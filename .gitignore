@@ -1,0 +1,28 @@
+# Environment variables & secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+env/
+
+# Runtime files
+.tunnel-client/*.pid
+.tunnel-client/*.url
+
+# Local bridge runtime state & verification logs
+local-bridge/.state/
+local-bridge/.verification/
+output/
+
+# Temporary / Log files
+*.log
+*.tmp
+.DS_Store
+Thumbs.db

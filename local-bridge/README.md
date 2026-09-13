@@ -1,0 +1,107 @@
+# Local MCP Bridge
+
+Bridge nối ChatGPT Web với project cố định **`D:/AI/New folder`**. ChatGPT trực tiếp viết code; bridge không gọi lượt AI, sinh code hoặc review của Codex. Python và `mcp==1.30.0` vẫn dùng tunnel coding hiện có.
+
+**Trạng thái nghiệm thu:** xem [ACCEPTANCE.md](ACCEPTANCE.md). Bảng và chức năng đọc/sửa/hoàn tác hoạt động. Windows hiện chưa vượt qua kiểm tra sandbox, nên tìm bằng `rg`, Git diff và chạy task bị khóa. `healthz`/`readyz` của tunnel không chứng nhận quyền chạy lệnh.
+
+## Khởi động
+
+Chạy script cũ bằng Windows PowerShell 5.1:
+
+```powershell
+& 'D:\AI\tunnel-client-v0.0.14-windows-arm64\start-chatgpt-coding-tunnel.ps1'
+```
+
+Script tự đọc khóa tunnel hiện có, chạy self-test, kiểm tra App Server rồi mở tunnel. Nếu đúng tunnel coding đã chạy, script báo PID và kết thúc; không mở thêm bridge cùng journal. Không sửa cấu hình Blender/SolidWorks.
+
+Trong ChatGPT, dùng app **Codex app** đã kết nối. Sau khi thay đổi danh sách tool, vào Settings → Apps → Codex app → **Làm mới**. Hỏi: “Đọc project_info rồi mở show_control_panel”. Bảng có ba phần: Đợt sửa, Test/build, Project và kết nối. Các tool dữ liệu cập nhật bảng hiện tại; chỉ `show_control_panel` tạo bảng mới. Xác nhận bắt buộc của ChatGPT vẫn do ChatGPT quản lý.
+
+Trong Codex desktop, mở cùng `D:/AI/New folder` để xem file. Bảng đọc trạng thái Git hiện tại của folder; diff theo từng đợt sửa dùng được cả khi chưa có Git. Bridge không tự tạo repo hoặc chọn lệnh test/build cho folder này.
+
+## Xem trước, áp dụng, hoàn tác
+
+1. `read_file` lấy nội dung và SHA-256 của file đang có. Có thể chọn `start_line`, `end_line`, `max_bytes`; SHA luôn tính trên toàn file.
+2. `prepare_changes` tạo đợt có tên, lưu bản trước/sau ngoài project và trả diff. Bước này chưa ghi file.
+3. Xem diff theo file trong bảng hoặc bằng `get_change`.
+4. `apply_changes` áp dụng đợt đã chuẩn bị. Nếu Khầy chỉ yêu cầu xem trước, dừng ở bước 3.
+5. `undo_changes` chỉ hoàn tác khi **tất cả** file còn khớp bản sau. Nếu có sửa mới từ bên ngoài, cả đợt bị từ chối và trả danh sách file xung đột.
+
+Ví dụ tạo file mới trong một thư mục đã tồn tại:
+
+```json
+{
+  "title": "Thêm lời chào",
+  "request_id": "prepare-greeting-001",
+  "edits": [
+    {"path": "hello.txt", "content": "Chào Khầy\r\n", "expected_sha256": null}
+  ]
+}
+```
+
+Với file đã có, `expected_sha256` phải là SHA vừa đọc. Có thể thay `content` bằng `old_text` và `new_text`; đoạn cũ phải khớp chính xác **một lần**. Chưa có xóa/đổi tên file tổng quát. Hoàn tác được phép gỡ đúng file do đợt đó tạo nếu SHA còn khớp.
+
+```json
+{"change_id": "ID_TRẢ_VỀ", "request_id": "apply-greeting-001"}
+```
+
+Dùng JSON trên cho `apply_changes`; khi hoàn tác dùng `undo_changes` với một request ID khác. Khi mất kết nối, đọc lại trạng thái và **gửi lại đúng request ID ban đầu**. Không đổi ID để thử lại thao tác chưa rõ kết quả. Bridge lưu chống thực hiện trùng qua lần khởi động lại. Một ID đã dùng cho nội dung khác sẽ bị từ chối.
+
+Mặc định mỗi file tối đa 2 MiB, mỗi đợt tối đa 100 file và 16 MiB tổng bản trước/sau. Thư mục cha phải có sẵn. Mỗi file được ghi qua file tạm rồi thay thế; cả đợt nhiều file không phải một lần ghi nguyên tử. Bridge không dùng `git reset`, không sửa Git index.
+
+## Nhật ký và phục hồi
+
+SQLite nằm trong `local-bridge/.state/<mã project>/`, ngoài project được phép sửa. Chỉ một bridge được giữ khóa journal đó. Giữ bản sao của 30 đợt hoàn tất gần nhất; đợt chưa áp dụng, bị lỗi hoặc có xung đột không bị dọn. ID nhỏ của đợt đã hết hạn vẫn được giữ để chống thực hiện lại.
+
+Sau sự cố, bridge kiểm tra SHA và tiến độ ghi của từng file để phục hồi phần đã ghi. File bị chương trình khác sửa được giữ lại. Trạng thái `recovery_conflict` khóa những lần ghi tiếp theo. Xem `get_change` và `project_info` để biết file nào xung đột; xử lý nội dung trong máy sau khi giữ bản sửa ngoài bridge, rồi khởi động lại để kiểm tra phục hồi. Không xóa journal hoặc sửa SHA trong SQLite để vượt qua xung đột.
+
+`recovered` nghĩa là lần áp dụng lỗi đã được trả về bản trước. `undo_failed` nghĩa là lần hoàn tác lỗi đã được trả về bản sau. Các lần lỗi này không tự chạy lại; đọc nội dung hiện tại và chuẩn bị một đợt mới nếu cần.
+
+## Test/build
+
+`list_tasks` hiện chỉ có hai ID giữ nguyên: `git_status`, `git_diff_check`. `start_task(task_id, request_id, timeout_seconds)` trả `run_id` ngay. Dùng `get_task_run(run_id, cursor)` để lấy phần log mới và `stop_task_run(run_id, request_id)` để dừng. `run_task` cũ dùng chung bộ chạy nhưng chờ kết quả đồng bộ.
+
+Tối đa một task chạy; áp dụng/hoàn tác bị khóa trong lúc chạy. Log có trạng thái, thời gian và mã kết thúc, không tạo phần trăm giả. Bảng lấy trạng thái mỗi 2 giây khi đang hiển thị và có task hoạt động. Log giữ trong bộ nhớ cho 30 lượt gần nhất, giới hạn khoảng 256 KiB; sau restart chỉ còn trạng thái và ID trong SQLite. Timeout tối đa hiện cấu hình là 300 giây. Nếu mất App Server, không tự chạy lại task.
+
+Muốn thêm task về sau, sửa `config.json` **trong máy** với executable đã cài và đối số cố định, rồi khởi động lại. ChatGPT không được thêm lệnh, đổi project, tăng quyền hoặc bật mạng. Trên Windows phải dùng executable thật; bridge từ chối shim `.cmd`, `.bat`, `.ps1`. Mỗi runtime bổ sung phải có đường dẫn đọc tối thiểu trong `runtime_read_roots` và vượt qua doctor trước khi dùng.
+
+## Quyền và phạm vi
+
+- App Server là tiến trình ẩn riêng qua STDIO, được bridge sở hữu cùng các tiến trình con bằng Windows Job Object. Đóng bridge sẽ đóng nhóm riêng này.
+- Các lệnh chỉ dùng profile `bridge`: project/cache được ghi, runtime cần thiết được đọc, mạng mặc định tắt. Nếu kiểm tra thực tế thất bại, bridge từ chối chạy lệnh; không có chế độ chạy không bảo vệ dự phòng.
+- Không truyền khóa tunnel vào App Server/task. Không lưu nội dung file hoặc lịch sử đầy đủ vào log chẩn đoán. Nhật ký thay đổi riêng vẫn cần lưu bản trước/sau để hoàn tác.
+- Đọc/tìm/diff cùng chặn `.env`, khóa/certificate, cấu hình nhạy cảm, file nhị phân, đường dẫn thoát project, Windows ADS, symlink/junction và hardlink không an toàn. Quản lý quyền file không phụ thuộc vào sandbox của lệnh.
+- Chỉ hai tool `openaiDeveloperDocs` được gọi qua `mcpServer/tool/call`. MCP/plugin khác bị tắt bằng tham số của tiến trình bridge; cấu hình Codex toàn cục không đổi. Ngữ cảnh kỹ thuật tạm không có lượt sinh code.
+- `list_skills` tìm skill; chỉ đọc tài liệu trong thư mục skill đã được xác định. Hướng dẫn skill không cấp quyền chạy script.
+- Chỉ liệt kê/đọc hội thoại Codex có `cwd` đúng project, theo yêu cầu. Không đọc task khác, tiếp tục task cũ hoặc xuất toàn bộ kết quả tool riêng tư.
+- Bảng dùng MCP Apps resource `ui://local-bridge/control-panel-v1.html`, không có frontend build hoặc cổng HTTP riêng. Code/log được hiển thị bằng văn bản.
+
+## Kiểm tra trong máy
+
+Self-test dùng project mẫu riêng, không thay đổi project của Khầy:
+
+```powershell
+Set-Location -LiteralPath 'D:\AI\tunnel-client-v0.0.14-windows-arm64'
+uv run --with mcp==1.30.0 --python 3.13 local-bridge/server.py --self-test
+uv run --with mcp==1.30.0 --python 3.13 local-bridge/verify_runtime.py
+```
+
+Self-test kiểm tra logic và nhóm tiến trình Windows; các bài dùng runtime giả **không** chứng nhận sandbox của App Server. `verify_runtime.py` kiểm tra App Server thật trên project mẫu. Mã kết thúc 2 nghĩa là phần chạy lệnh chưa đạt; khi chạy qua `uv`, công cụ ngoài có thể báo mã 1.
+
+Khi tunnel coding đã dừng, chạy doctor đầy đủ của script:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\start-chatgpt-coding-tunnel.ps1 -DoctorOnly
+```
+
+Không chạy doctor thứ hai trên cùng journal đang bị bridge giữ khóa. Khi tunnel đang chạy, đọc `project_info` và hai endpoint từ địa chỉ trong `.tunnel-client/chatgpt-coding-health.url` (`/healthz`, `/readyz`). Không công khai địa chỉ/khóa của tunnel.
+
+`test_ui.cjs` là kiểm thử Chromium với MCP host mẫu và project tạm; cần Playwright/Chrome đã cài. Bài này kiểm tra diff/áp dụng/hoàn tác và chống thực thi HTML, không thay thế kiểm thử iframe thật trên ChatGPT.
+
+## Tài liệu giao thức
+
+- [Codex App Server](https://learn.chatgpt.com/docs/app-server)
+- [Phạm vi permission profiles](https://learn.chatgpt.com/docs/permissions#scope-and-enforcement)
+- [Windows sandbox](https://learn.chatgpt.com/docs/windows/windows-sandbox)
+- [MCP server cho ChatGPT](https://developers.openai.com/apps-sdk/build/mcp-server/)
+- [Giao diện ChatGPT](https://developers.openai.com/apps-sdk/build/chatgpt-ui/)
+- [MCP Apps](https://modelcontextprotocol.io/docs/extensions/apps)

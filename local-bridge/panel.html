@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="vi">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Local MCP Bridge</title>
+<style>
+  :root{color-scheme:light dark;font:14px/1.5 system-ui,sans-serif;--line:#8885;--muted:#71717a;--accent:#087f74}
+  *{box-sizing:border-box}body{margin:0;padding:18px;color:var(--color-text-primary,CanvasText);background:var(--color-background-primary,Canvas)}
+  header,.row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}header{justify-content:space-between}h1{font-size:19px;margin:0}h2{font-size:16px;margin:0 0 12px}
+  section{border:1px solid var(--line);border-radius:12px;padding:16px;margin-top:16px}p{margin:8px 0}.muted{color:var(--color-text-secondary,var(--muted));font-size:12px}
+  button,select{font:inherit;border:1px solid var(--line);border-radius:7px;padding:7px 11px;background:var(--color-background-secondary,Canvas);color:inherit;max-width:100%}
+  button{cursor:pointer}button:disabled{opacity:.45;cursor:default}button.primary{background:var(--accent);color:white;border-color:var(--accent)}button.danger{color:#c43838}
+  button:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:3px}select{flex:1;min-width:120px}
+  pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:320px;overflow:auto;border:1px solid var(--line);border-radius:7px;padding:12px;font:12px/1.55 ui-monospace,Consolas,monospace}
+  #error{color:#bd3030;white-space:pre-wrap}#connection{font-size:12px;padding:3px 9px;border:1px solid var(--line);border-radius:20px}#projectPath{overflow-wrap:anywhere}
+  label{font-size:12px}#fileSelect{width:100%;margin:8px 0}.hidden{display:none}@media(max-width:450px){body{padding:10px}section{padding:12px}.row button{flex:1}}
+</style>
+<header><h1>Local MCP Bridge</h1><span id="connection" role="status">Đang kết nối…</span></header>
+<p id="error" role="alert"></p>
+<section aria-labelledby="changesTitle">
+  <h2 id="changesTitle">Đợt sửa</h2>
+  <div class="row"><label for="changeSelect">Chọn đợt</label><select id="changeSelect"><option value="">Chưa có đợt sửa</option></select><button id="refresh">Làm mới</button></div>
+  <p id="changeStatus" class="muted">Chuẩn bị thay đổi trong hội thoại để xem diff ở đây.</p>
+  <label for="fileSelect">File trong đợt sửa</label><select id="fileSelect"><option value="">Tất cả file</option></select>
+  <pre id="diff" aria-label="Nội dung diff">Chưa chọn đợt sửa.</pre>
+  <button id="moreDiff" class="hidden">Đọc tiếp diff</button>
+  <div class="row"><button id="apply" class="primary" disabled>Áp dụng đợt sửa</button><button id="undo" disabled>Hoàn tác đợt sửa</button></div>
+</section>
+<section aria-labelledby="taskTitle">
+  <h2 id="taskTitle">Test/build</h2>
+  <div class="row"><label for="taskSelect">Task</label><select id="taskSelect"></select><button id="start" disabled>Chạy</button><button id="stop" class="danger" disabled>Dừng</button></div>
+  <p id="taskStatus" role="status">Chưa có task chạy.</p><p id="taskNote" class="muted"></p>
+  <pre id="logs" aria-label="Log task" aria-live="off">Log sẽ xuất hiện ở đây.</pre>
+</section>
+<section aria-labelledby="projectTitle">
+  <h2 id="projectTitle">Project và kết nối</h2>
+  <p id="projectPath">Đang tải project…</p><p id="projectDetails" class="muted"></p>
+  <p class="muted">Mở cùng thư mục này trong Codex desktop để xem file. Diff và hoàn tác từng đợt dùng được cả khi thư mục chưa có Git.</p>
+</section>
+<script>
+(() => {
+  "use strict";
+  const $ = id => document.getElementById(id), pending = new Map();
+  const statuses = {prepared:"Đang chờ áp dụng",applied:"Đã áp dụng",undone:"Đã hoàn tác",applying:"Đang ghi",undoing:"Đang hoàn tác",recovered:"Đã phục hồi sau lỗi",recovery_conflict:"Cần xử lý xung đột",undo_failed:"Hoàn tác lỗi, đã phục hồi",expired:"Đã hết thời hạn lưu bản sao",running:"Đang chạy",succeeded:"Thành công",failed:"Thất bại",stopped:"Đã dừng",timed_out:"Hết thời gian",runtime_lost:"Mất kết nối bộ chạy"};
+  let connected=false, disposed=false, visible=true, hostOrigin=null, project=null, change=null, runId=null, cursor=0, timer=null, polling=false, busy=false, nextDiff=null, pendingStart=null;
+  const notify=(method,params)=>parent.postMessage({jsonrpc:"2.0",method,params},hostOrigin || "*");
+  function rpc(method,params){
+    return new Promise((resolve,reject)=>{
+      const id=crypto.randomUUID(), timeout=setTimeout(()=>{pending.delete(id);reject(new Error("Kết nối hết thời gian. Thao tác chưa được tự chạy lại; bấm Làm mới để kiểm tra."));},60000);
+      pending.set(id,{resolve,reject,timeout});parent.postMessage({jsonrpc:"2.0",id,method,params},hostOrigin || "*");
+    });
+  }
+  function unpack(result){
+    if(result?.isError)throw new Error(result.content?.filter(x=>x.type==="text").map(x=>x.text).join("\n")||"Tool báo lỗi.");
+    return result?.structuredContent || JSON.parse(result?.content?.find(x=>x.type==="text")?.text || "{}");
+  }
+  async function call(name,args={}){return unpack(await rpc("tools/call",{name,arguments:args}));}
+  function error(e){$("error").textContent=e.message || String(e);$("connection").textContent="Cần kiểm tra kết nối";}
+  function options(select,items,key,label,empty){
+    const value=select.value; select.replaceChildren();
+    if(empty){const o=document.createElement("option");o.value="";o.textContent=empty;select.append(o);}
+    for(const item of items){const o=document.createElement("option");o.value=item[key];o.textContent=label(item);select.append(o);}
+    if([...select.options].some(o=>o.value===value))select.value=value;
+  }
+  function buttons(){
+    const active=!!project?.active_run_id;
+    $("apply").disabled=busy||active||change?.status!=="prepared";
+    $("undo").disabled=busy||active||change?.status!=="applied";
+    $("start").disabled=busy||active||!project?.runtime?.commands_enabled||!$("taskSelect").value;
+    $("stop").disabled=busy||!active;
+  }
+  function renderProject(p){
+    project=p;$("projectPath").textContent=p.workspace_root;
+    $("connection").textContent=p.runtime.status==="connected"?"Đã kết nối":"Bộ chạy chưa kết nối";
+    $("projectDetails").textContent=`${p.runtime.version || "Chưa có phiên bản Codex"} · ${p.git_repository?"Có Git":"Thư mục chưa có Git"}`;
+    $("taskNote").textContent=p.runtime.commands_enabled?"Tối đa một task; file được khóa ghi trong lúc chạy.":"Bộ chạy chưa đạt kiểm tra bảo vệ dữ liệu và mạng. Chức năng chạy task đang tạm khóa; xem chi tiết bằng doctor.";
+    if(p.active_run_id && p.active_run_id!==runId){runId=p.active_run_id;cursor=0;$("logs").textContent="";}
+    buttons();schedule();
+  }
+  async function refresh(){
+    const [p,c,t]=await Promise.all([call("project_info"),call("list_changes"),call("list_tasks")]);
+    renderProject(p);options($("changeSelect"),c.changes,"id",x=>`${x.title} · ${statuses[x.status]||x.status}`,"Chọn đợt sửa");
+    options($("taskSelect"),t.tasks,"task_id",x=>x.task_id);
+    if($("changeSelect").value)await loadChange();
+    if(runId)await pollRun();buttons();
+  }
+  async function loadChange(append=false){
+    const id=$("changeSelect").value;if(!id){change=null;buttons();return;}
+    const selected=$("fileSelect").value;
+    const result=await call("get_change",{change_id:id,path:selected||null,offset:append?(nextDiff||0):0});
+    change=result;nextDiff=result.next_offset;
+    $("changeStatus").textContent=`${statuses[result.status]||result.status} · ${result.change_id}${result.error?" · "+result.error:""}`;
+    options($("fileSelect"),result.files,"path",x=>x.path,"Tất cả file");
+    $("diff").textContent=(append?$("diff").textContent:"")+result.diff;
+    $("moreDiff").classList.toggle("hidden",nextDiff==null);buttons();
+  }
+  async function mutation(name){
+    if(!change)return;
+    await call(name,{change_id:change.change_id,request_id:`ui-${name}-${change.change_id}`});await refresh();
+  }
+  async function start(){
+    const task=$("taskSelect").value;
+    if(!pendingStart)pendingStart={task_id:task,request_id:crypto.randomUUID(),timeout_seconds:120};
+    const run=await call("start_task",pendingStart);pendingStart=null;
+    runId=run.run_id;cursor=0;$("logs").textContent="";await refresh();
+  }
+  async function pollRun(){
+    if(!runId)return;
+    const r=await call("get_task_run",{run_id:runId,cursor});
+    const text=r.events.map(e=>e.text).join("");cursor=r.next_cursor;
+    $("logs").textContent=($("logs").textContent+text).slice(-262144);
+    $("taskStatus").textContent=`${statuses[r.status]||r.status}${r.stopping?" · đang dừng…":""} · ${r.elapsed_seconds}s${r.exit_code!=null?" · mã kết thúc "+r.exit_code:""}`;
+    if(r.error)$("taskNote").textContent=r.error;
+    if(r.status!=="running" && project){project.active_run_id=null;buttons();}
+  }
+  function schedule(){
+    clearTimeout(timer);
+    if(!disposed&&connected&&visible&&!document.hidden&&project?.active_run_id)timer=setTimeout(async()=>{
+      if(polling)return;polling=true;
+      try{await pollRun();renderProject(await call("project_info"));}catch(e){error(e);}finally{polling=false;schedule();}
+    },2000);
+  }
+  async function action(fn){busy=true;buttons();$("error").textContent="";try{await fn();}catch(e){error(e);}finally{busy=false;buttons();schedule();}}
+  $("refresh").onclick=()=>action(refresh);
+  $("changeSelect").onchange=()=>action(async()=>{$("fileSelect").value="";await loadChange();});
+  $("fileSelect").onchange=()=>action(()=>loadChange());
+  $("moreDiff").onclick=()=>action(()=>loadChange(true));
+  $("apply").onclick=()=>action(()=>mutation("apply_changes"));
+  $("undo").onclick=()=>action(()=>mutation("undo_changes"));
+  $("start").onclick=()=>action(start);
+  $("stop").onclick=()=>action(async()=>{await call("stop_task_run",{run_id:runId,request_id:`ui-stop-${runId}`});await pollRun();});
+  window.addEventListener("message",event=>{
+    if(event.source!==parent||!event.data||event.data.jsonrpc!=="2.0"||(hostOrigin&&event.origin!==hostOrigin))return;
+    const m=event.data;
+    if(pending.has(m.id)){
+      const p=pending.get(m.id);pending.delete(m.id);clearTimeout(p.timeout);
+      if(!hostOrigin&&event.origin!=="null")hostOrigin=event.origin;
+      m.error?p.reject(new Error(m.error.message)):p.resolve(m.result);return;
+    }
+    if(m.method==="ui/notifications/tool-result"){
+      try{const data=unpack(m.params);if(data.project)renderProject(data.project);}catch(e){error(e);}
+    }else if(m.method==="ui/notifications/tool-cancelled"){error(new Error(m.params.reason||"Thao tác bị hủy."));
+    }else if(m.method==="ui/resource-teardown"){
+      disposed=true;clearTimeout(timer);parent.postMessage({jsonrpc:"2.0",id:m.id,result:{}},hostOrigin||"*");
+    }else if(m.method==="ui/notifications/host-context-changed"){
+      if(m.params.theme)document.documentElement.style.colorScheme=m.params.theme;
+    }
+  });
+  document.addEventListener("visibilitychange",schedule);
+  new IntersectionObserver(entries=>{visible=entries[0].isIntersecting;schedule();}).observe(document.body);
+  new ResizeObserver(()=>{if(connected)notify("ui/notifications/size-changed",{height:document.documentElement.scrollHeight});}).observe(document.body);
+  rpc("ui/initialize",{protocolVersion:"2026-01-26",appInfo:{name:"local-bridge-panel",version:"1.0.0"},appCapabilities:{availableDisplayModes:["inline","fullscreen"]}})
+    .then(result=>{connected=true;notify("ui/notifications/initialized",{});if(result.hostContext?.theme)document.documentElement.style.colorScheme=result.hostContext.theme;return action(refresh);}).catch(error);
+})();
+</script>
+</html>
