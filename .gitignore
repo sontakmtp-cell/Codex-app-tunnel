@@ -15,6 +15,7 @@ env/
 # Runtime files
 .tunnel-client/*.pid
 .tunnel-client/*.url
+.tunnel-client/*.sha256
 
 # Local bridge runtime state & verification logs
 local-bridge/.state/

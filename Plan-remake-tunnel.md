@@ -20,7 +20,7 @@ Python MCP Bridge — kiểm tra quyền, lưu đợt sửa
 
 &#x20;             ↓
 
-Codex App Server STDIO — chạy lệnh, đọc file, MCP, skills
+Codex App Server STDIO — chạy lệnh, đọc file project và root ngoài được allowlist, MCP, skills
 
 &#x20;             ↓
 
@@ -32,13 +32,13 @@ Project local — mở cùng thư mục trong Codex desktop
 
 \- ChatGPT Web trực tiếp suy nghĩ và viết code. Không sử dụng agent Codex để code, review hoặc tự duyệt quyền.
 
-\- Giữ Python, SDK `mcp==1.30.0`, tunnel coding và script khởi động hiện có. Không thêm máy chủ public.
+\- Giữ Python, tunnel coding và script khởi động hiện có; nâng SDK lên `mcp==2.2.0` để phục vụ MCP `2026-07-28`. Không thêm máy chủ public.
 
 \- Bảng xem trước, hoàn tác, tiến độ và nút Dừng nằm ngay trong ChatGPT Web.
 
 \- ChatGPT được tự áp dụng đợt sửa sau khi chuẩn bị diff; nếu Khầy chỉ yêu cầu xem trước thì không ghi file.
 
-\- Giữ project hiện tại tại `D:/AI/New folder`. Kiểm thử Git/test/build bằng project mẫu tạm riêng.
+\- Chọn project mặc định bằng một dòng trong `local-bridge/project-path.txt`; `H:/AI/autolab` chỉ là project kiểm thử hiện tại. Có thể đổi tạm bằng tham số `-ProjectPath` khi chạy script.
 
 \- Desktop dùng chung project; không đặt việc tự mở tab/panel làm điều kiện hoàn thành.
 
@@ -142,9 +142,10 @@ Chuẩn bị thay đổi → xem diff → áp dụng → có thể hoàn tác
 
 \- Có timeout, giới hạn log và xử lý bấm Dừng nhiều lần. Không tự chạy lại task sau mất kết nối.
 
-\- Chỉ nhận task ID được cấu hình local; không cho ChatGPT thêm lệnh, đổi thư mục chạy hoặc bật mạng tùy ý.
+\- Normal chỉ nhận task ID được cấu hình local; không cho ChatGPT thêm lệnh, đổi thư mục chạy, đổi root đọc hoặc bật/tắt mạng tùy ý. Turbo là ngoại lệ opt-in cho `run_bash` toàn quyền.
 
 \- Giữ hai task Git hiện có. Không tự suy đoán lệnh test/build cho project hiện tại.
+\- Task riêng của từng project nằm trong profile ngoài project, được chọn theo `workspace_root`; không đọc lệnh trực tiếp từ `package.json`, `pyproject.toml` hoặc file do ChatGPT sửa.
 
 
 
@@ -160,7 +161,7 @@ Chuẩn bị thay đổi → xem diff → áp dụng → có thể hoàn tác
 
 \- Dùng `skills/list` để tìm skill khả dụng; cho ChatGPT đọc hướng dẫn và tài liệu tham chiếu bên trong đúng thư mục skill đã xác định.
 
-\- Skill chỉ cung cấp hướng dẫn; không tự cấp quyền chạy script hoặc mở thêm MCP.
+\- Skill chỉ cung cấp hướng dẫn trong Normal; không tự cấp quyền. Turbo là ngoại lệ opt-in để gọi `run_bash` sau xác nhận người dùng.
 
 \- Cho đọc danh sách/lịch sử task Codex thuộc đúng project, theo yêu cầu; không đọc toàn bộ lịch sử tài khoản, không tiếp tục hay sửa task cũ.
 
@@ -174,7 +175,7 @@ Chuẩn bị thay đổi → xem diff → áp dụng → có thể hoàn tác
 
 \- Một giao diện HTML/JavaScript nhỏ, không React và không thêm chuỗi build frontend.
 
-\- Ba phần: \*\*Đợt sửa\*\*, \*\*Test/build\*\*, \*\*Project và kết nối\*\*.
+\- Có bộ chọn Normal/Turbo và ba phần: \*\*Đợt sửa\*\*, \*\*Test/build\*\*, \*\*Project và kết nối\*\*.
 
 \- Có xem diff theo file, Áp dụng đợt đang chờ, Hoàn tác đợt đã ghi và Dừng task.
 
@@ -238,9 +239,10 @@ Giao diện sử dụng MCP Apps bridge và tài nguyên UI trả qua MCP, khôn
 
 \- Chặn đường dẫn thoát project, symlink/junction, hardlink không an toàn, Windows ADS, `.env`, khóa, certificate và file nhị phân.
 
-\- Dùng permission profile riêng cho command: chỉ project và đường dẫn runtime/cache cần thiết, không mạng mặc định, chặn dữ liệu nhạy cảm.
+\- Ở Normal, dùng permission profile riêng cho command: project/cache được ghi; runtime và `external_read_roots` được đọc; mạng ngoài bật cố định; dữ liệu nhạy cảm vẫn bị chặn. Panel có Turbo dạng opt-in: sau xác nhận, `command/exec` dùng `sandboxPolicy={type:"dangerFullAccess"}` theo từng lệnh và `run_bash` chạy Git Bash; chế độ không lưu qua lần khởi động lại.
+\- `external_read_roots` là allowlist local cho các thư mục ngoài project; không có quyền ghi ngoài project. Root ngoài không được là project, thư mục cha của project hoặc chồng lấn với project, vì Windows sandbox không nhận đồng thời quyền đọc ở cha và quyền ghi ở con.
 
-\- Không coi `shell=False` hoặc danh sách task là sandbox. Nếu Windows không thực thi được policy đã chọn, từ chối chạy task.
+\- Không coi `shell=False` hoặc danh sách task là sandbox. Normal từ chối chạy task nếu Windows không thực thi được policy; Turbo là ngoại lệ có chủ ý và phải hiển thị cảnh báo toàn quyền.
 
 \- Không truyền API key của tunnel vào App Server/task; không ghi key, nội dung file hay lịch sử đầy đủ vào log chẩn đoán.
 
@@ -288,7 +290,7 @@ Kiểm thử bắt buộc:
 
 \- Task có log tăng dần, kết thúc thành công/thất bại/timeout; Dừng hoạt động cả với tiến trình con.
 
-\- Task không đọc được dữ liệu ngoài quyền, không nhận khóa tunnel và không tự mở mạng.
+\- Task chỉ đọc project và `external_read_roots`; không nhận khóa tunnel, không tự đổi quyền và dùng egress theo policy cố định của bridge.
 
 \- Chỉ MCP được duyệt được gọi; skill và lịch sử không mở rộng quyền project.
 

@@ -1,0 +1,7 @@
+{
+  "workspace_root": "D:/AI/project-khac",
+  "runtime_read_roots": ["${PROJECT_ROOT}/.venv"],
+  "tasks": {
+    "test": ["${PROJECT_ROOT}/.venv/Scripts/python.exe", "-m", "pytest", "-p", "no:cacheprovider"]
+  }
+}

@@ -1,4 +1,4 @@
-"""Run: uv run --with mcp==1.30.0 --python 3.13 server.py --self-test."""
+"""Run: uv run --with mcp==2.2.0 --python 3.13 server.py --self-test."""
 import asyncio
 import base64
 from dataclasses import replace
@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 from bridge import LocalBridge
 from files import BridgeConfig, BridgeError, ChangeJournal, _sha256, load_config
@@ -25,11 +26,16 @@ class FakeRuntime:
         self.listeners=[]
         self.command_ready=True
         self.command_error=""
+        self.execution_mode="normal"
         self.status="connected"
         self.version="test-peer"
         self.error=None
         self.calls=[]
         self.release=threading.Event()
+
+    @property
+    def can_execute(self):
+        return self.command_ready if self.execution_mode == "normal" else self.status == "connected"
 
     def command(self, argv, process_id, timeout, stream=True):
         self.calls.append(("command/exec",argv))
@@ -282,6 +288,41 @@ class BridgeTests(unittest.TestCase):
         self.assertFalse(runtime.command_ready)
         self.assertEqual(runtime.status,"stopped")
 
+    def test_runtime_modes_and_turbo_bash(self):
+        self.assertEqual(self.b.project_info()["runtime"]["mode"], "normal")
+        with self.assertRaisesRegex(BridgeError, "TURBO_CONFIRMATION_REQUIRED"):
+            self.b.set_runtime_mode("turbo")
+        self.runtime.command_ready=False
+        self.b.set_runtime_mode("turbo", True)
+        info=self.b.project_info()
+        self.assertTrue(info["runtime"]["commands_enabled"])
+        self.assertTrue(info["runtime"]["bash_enabled"])
+        with patch("bridge._git_bash_executable", return_value=Path(sys.executable)):
+            result=self.b.run_bash("printf turbo")
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(self.runtime.calls[-1][1][1:], ["-c", "printf turbo"])
+        self.b.set_runtime_mode("normal")
+        with self.assertRaisesRegex(BridgeError, "TURBO_REQUIRED"):
+            self.b.run_bash("printf blocked")
+
+    def test_app_server_uses_separate_normal_and_turbo_command_policy(self):
+        runtime=AppServer(self.root,self.home/"state-policy")
+        runtime.status="connected"
+        runtime.command_ready=True
+        calls=[]
+        def accepted(method, params, timeout=30):
+            calls.append(params)
+            return {"exitCode":0,"stdout":"","stderr":""}
+        runtime.call=accepted
+        runtime.command([sys.executable],"normal-run",1,stream=False)
+        self.assertEqual(calls[-1]["permissionProfile"], "bridge")
+        self.assertNotIn("sandboxPolicy", calls[-1])
+        runtime.execution_mode="turbo"
+        runtime.command_ready=False
+        runtime.command([sys.executable],"turbo-run",1,stream=False)
+        self.assertEqual(calls[-1]["sandboxPolicy"], {"type":"dangerFullAccess"})
+        self.assertNotIn("permissionProfile", calls[-1])
+
     @unittest.skipUnless(os.name=="nt","Windows Job Object check")
     def test_owned_job_stops_descendants_only(self):
         import ctypes
@@ -358,6 +399,11 @@ class BridgeTests(unittest.TestCase):
         overrides=process_overrides(self.root,self.home/"cache",[])
         filesystem=next(v for v in overrides if v.startswith("permissions.bridge.filesystem="))
         self.assertNotIn(json.dumps(str(self.root/".git"))+"=",filesystem)
+        external=self.home/"external-read";external.mkdir()
+        overrides=process_overrides(self.root,self.home/"cache",[],[external])
+        filesystem=next(v for v in overrides if v.startswith("permissions.bridge.filesystem="))
+        self.assertIn(json.dumps(str(external))+"=\"read\"",filesystem)
+        self.assertIn("permissions.bridge.network.enabled=true"," ".join(overrides))
         (self.root/".git").mkdir()
         self.assertFalse(self.b.project_info()["git_repository"])
         prior=os.environ.get("CONTROL_PLANE_API_KEY")
@@ -370,24 +416,69 @@ class BridgeTests(unittest.TestCase):
         config=self.home/"bad-config.json"
         config.write_text(json.dumps({"workspace_root":str(self.root),"state_dir":str(self.root/"state")}))
         with self.assertRaises(BridgeError):load_config(config)
+        parent_config=self.home/"parent-config.json"
+        parent_config.write_text(json.dumps({"workspace_root":str(self.root),"external_read_roots":[str(self.home)]}))
+        with self.assertRaisesRegex(BridgeError,"external_read_roots"):
+            load_config(parent_config)
+        selected=self.home/"selected-project";selected.mkdir();(selected/"runtime").mkdir()
+        (self.home/"project-path.txt").write_text(str(selected),encoding="utf-8")
+        selected_config=self.home/"selector-config.json"
+        selected_config.write_text(json.dumps({"workspace_root":"${PROJECT_ROOT}",
+            "tasks":{"sample":["python","${PROJECT_ROOT}/sample.py"]},
+            "runtime_read_roots":["${PROJECT_ROOT}/runtime"]}),encoding="utf-8")
+        prior_project=os.environ.pop("CODEX_BRIDGE_PROJECT_ROOT",None)
+        try:
+            configured=load_config(selected_config)
+            self.assertEqual(configured.workspace_root,selected.resolve())
+            self.assertEqual(configured.tasks["sample"][1].replace("\\","/"),
+                             str(selected.resolve()/"sample.py").replace("\\","/"))
+            optional_config=self.home/"optional-runtime.json"
+            optional_config.write_text(json.dumps({"workspace_root":"${PROJECT_ROOT}",
+                "runtime_read_roots":["${PROJECT_ROOT}/missing-runtime"]}),encoding="utf-8")
+            self.assertEqual(load_config(optional_config).runtime_read_roots,())
+            profiles=self.home/"project-profiles";profiles.mkdir()
+            (profiles/"selected.json").write_text(json.dumps({"workspace_root":str(selected),
+                "runtime_read_roots":["${PROJECT_ROOT}/runtime"],
+                "tasks":{"profile_test":["python","-m","pytest"]}}),encoding="utf-8")
+            profiled=load_config(selected_config)
+            self.assertIn("profile_test",profiled.tasks)
+            self.assertIn(selected/"runtime",profiled.runtime_read_roots)
+            override=self.home/"override-project";override.mkdir();(override/"runtime").mkdir()
+            os.environ["CODEX_BRIDGE_PROJECT_ROOT"]=str(override)
+            self.assertEqual(load_config(selected_config).workspace_root,override.resolve())
+        finally:
+            if prior_project is None:os.environ.pop("CODEX_BRIDGE_PROJECT_ROOT",None)
+            else:os.environ["CODEX_BRIDGE_PROJECT_ROOT"]=prior_project
+
+    def test_task_runtime_must_be_explicitly_allowlisted(self):
+        runtime_dir=self.root/".venv-paxg";runtime_dir.mkdir()
+        executable=runtime_dir/"Scripts"/"python.exe";executable.parent.mkdir();executable.write_bytes(b"test")
+        self.b.config=replace(self.b.config,tasks={"local":(str(executable),)},runtime_read_roots=())
+        with self.assertRaisesRegex(BridgeError,"outside the project or in runtime_read_roots"):
+            self.b.tasks._command("local")
+        self.b.config=replace(self.b.config,runtime_read_roots=(runtime_dir,))
+        self.assertEqual(Path(self.b.tasks._command("local")[0]).resolve(),executable.resolve())
+        with self.assertRaisesRegex(BridgeError,"runtime roots are execution-only"):
+            self.b.read_file(".venv-paxg/Scripts/python.exe")
 
     def test_mcp_schema_and_ui_contract(self):
         import server
         tools=asyncio.run(server.mcp.list_tools())
-        self.assertEqual(len(tools),25)
+        self.assertEqual(len(tools),27)
+        self.assertEqual(server.mcp._lowlevel_server.extensions,{"io.modelcontextprotocol/ui":{}})
         linked=[t.name for t in tools if (t.meta or {}).get("ui",{}).get("resourceUri")]
-        self.assertEqual(linked,["show_control_panel"])
+        self.assertEqual(linked,["show_control_panel","set_runtime_mode"])
         self.runtime.command_ready=False
         panel=self.b.show_control_panel()
         self.assertTrue(panel["panel_available"])
         self.assertFalse(panel["task_state"]["available"])
         names={t.name:t for t in tools}
-        self.assertEqual(list(names["run_task"].inputSchema["properties"]),["task_id","timeout_seconds"])
-        self.assertTrue(all(t.annotations and t.outputSchema for t in tools))
+        self.assertEqual(list(names["run_task"].input_schema["properties"]),["task_id","timeout_seconds"])
+        self.assertTrue(all(t.annotations and t.output_schema for t in tools))
         contents=list(asyncio.run(server.mcp.read_resource(server.UI_URI)))
         self.assertEqual(contents[0].mime_type,"text/html;profile=mcp-app")
         html=contents[0].content
-        for required in ("ui/initialize","ui/notifications/initialized","tools/call","ui/notifications/tool-result","2000"):
+        for required in ("ui/initialize","ui/notifications/initialized","ui/notifications/tool-input","tools/call","ui/notifications/tool-result","2000","modeNormal","modeTurbo"):
             self.assertIn(required,html)
         for unsafe in ("innerHTML","eval(","http://localhost","<script src="):
             self.assertNotIn(unsafe,html)

@@ -21,6 +21,7 @@ DEFAULT_MAX_FILE_BYTES = 2 * 1024 * 1024
 DEFAULT_MAX_LIST_RESULTS = 500
 DEFAULT_MAX_TASK_TIMEOUT = 300
 MAX_OUTPUT_CHARS = 20000
+PROJECT_ROOT_TOKEN = "${PROJECT_ROOT}"
 SENSITIVE_DIRECTORIES = {".codex", ".agents", ".ssh", ".aws", ".azure", ".gnupg"}
 BLOCKED_DIRECTORIES = SENSITIVE_DIRECTORIES | {".git", ".venv", "venv", "node_modules", "__pycache__",
                                               ".pytest_cache", ".mypy_cache"}
@@ -70,6 +71,67 @@ def _validate_command(argv, task_id):
     return tuple(argv)
 
 
+def _configured_project(raw, config_path):
+    value = raw["workspace_root"]
+    if value == PROJECT_ROOT_TOKEN:
+        override = os.environ.get("CODEX_BRIDGE_PROJECT_ROOT", "").strip()
+        if override:
+            value = override
+        else:
+            selector = config_path.with_name("project-path.txt")
+            try:
+                lines = selector.read_text(encoding="utf-8-sig").splitlines()
+            except OSError as exc:
+                raise BridgeError("INVALID_CONFIG: create local-bridge/project-path.txt with one project path.") from exc
+            if len(lines) != 1 or not lines[0].strip():
+                raise BridgeError("INVALID_CONFIG: project-path.txt must contain exactly one project path.")
+            value = lines[0].strip()
+    return Path(value)
+
+
+def _expand_project_root(value, root):
+    if not isinstance(value, str):
+        raise ValueError()
+    return value.replace(PROJECT_ROOT_TOKEN, root.as_posix())
+
+
+def _runtime_roots(values, root):
+    roots = []
+    for raw_path in values:
+        expanded = _expand_project_root(raw_path, root)
+        runtime_path = Path(expanded)
+        if not runtime_path.is_absolute() or runtime_path == Path(runtime_path.anchor):
+            raise ValueError()
+        if runtime_path.is_dir():
+            roots.append(runtime_path)
+        elif PROJECT_ROOT_TOKEN not in raw_path:
+            raise ValueError()
+    return tuple(roots)
+
+
+def _matching_profile(root, config_path):
+    profile_dir = config_path.with_name("project-profiles")
+    if not profile_dir.is_dir():
+        return {}
+    check_link_chain(profile_dir)
+    matches = []
+    for profile_path in sorted(profile_dir.glob("*.json")):
+        check_link_chain(profile_path)
+        try:
+            profile = json.loads(profile_path.read_text(encoding="utf-8-sig"))
+            profile_root = Path(profile["workspace_root"])
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise BridgeError(f"INVALID_CONFIG: invalid task profile {profile_path.name}.") from exc
+        if not profile_root.is_absolute():
+            raise BridgeError(f"INVALID_CONFIG: task profile {profile_path.name} needs an absolute workspace_root.")
+        if profile_root.resolve() == root:
+            matches.append((profile_path, profile))
+    if len(matches) > 1:
+        names = ", ".join(path.name for path, _ in matches)
+        raise BridgeError(f"INVALID_CONFIG: multiple task profiles match the project: {names}.")
+    return matches[0][1] if matches else {}
+
+
 @dataclass(frozen=True)
 class BridgeConfig:
     workspace_root: Path
@@ -81,12 +143,13 @@ class BridgeConfig:
     codex_executable: str | None = None
     runtime_read_roots: tuple[Path, ...] = ()
     completed_changes_to_keep: int = 30
+    external_read_roots: tuple[Path, ...] = ()
 
 
 def load_config(path: Path):
     try:
         raw = json.loads(path.read_text(encoding="utf-8-sig"))
-        root = Path(raw["workspace_root"])
+        root = _configured_project(raw, path)
         if not root.is_absolute() or not root.is_dir():
             raise ValueError()
         check_link_chain(root)
@@ -100,18 +163,39 @@ def load_config(path: Path):
         for name in tasks:
             if not re.fullmatch(r"[a-z][a-z0-9_-]{1,63}", name):
                 raise ValueError()
-        state = Path(raw.get("state_dir", str(path.parent / ".state" / _sha256(str(root).lower().encode())[:16])))
+        profile = _matching_profile(root, path)
+        profile_tasks = profile.get("tasks", {})
+        if not isinstance(profile_tasks, dict):
+            raise BridgeError("INVALID_CONFIG: task profile tasks must be an object.")
+        for name in profile_tasks:
+            if not re.fullmatch(r"[a-z][a-z0-9_-]{1,63}", name):
+                raise ValueError()
+        if set(tasks) & set(profile_tasks):
+            raise BridgeError("INVALID_CONFIG: task profiles cannot override built-in task IDs.")
+        tasks = {**tasks, **profile_tasks}
+        state_value = raw.get("state_dir", str(path.parent / ".state" / _sha256(str(root).lower().encode())[:16]))
+        state = Path(_expand_project_root(state_value, root))
         if not state.is_absolute() or state.resolve().is_relative_to(root):
             raise BridgeError("INVALID_CONFIG: state_dir must be absolute and outside the project.")
-        runtime_roots = tuple(Path(p) for p in raw.get("runtime_read_roots", []))
-        if any(not p.is_absolute() or not p.is_dir() or p == Path(p.anchor) for p in runtime_roots):
-            raise ValueError()
-        return BridgeConfig(root, {k: _validate_command(v, k) for k, v in tasks.items()},
+        runtime_roots = _runtime_roots([*raw.get("runtime_read_roots", []),
+                                        *profile.get("runtime_read_roots", [])], root)
+        external_roots = tuple(Path(_expand_project_root(p, root)).resolve()
+                               for p in raw.get("external_read_roots", []))
+        if any(not p.is_absolute() or not p.is_dir() or p == Path(p.anchor) or
+               p.is_relative_to(root) or root.is_relative_to(p) for p in external_roots):
+            raise BridgeError("INVALID_CONFIG: external_read_roots must be existing, non-root, non-overlapping directories.")
+        expanded_tasks = {k: [_expand_project_root(value, root) for value in argv]
+                          for k, argv in tasks.items()}
+        codex_executable = raw.get("codex_executable")
+        if codex_executable is not None:
+            codex_executable = _expand_project_root(codex_executable, root)
+        return BridgeConfig(root, {k: _validate_command(v, k) for k, v in expanded_tasks.items()},
             integer(raw.get("max_file_bytes", DEFAULT_MAX_FILE_BYTES), "max_file_bytes", 1, 10*1024*1024),
             integer(raw.get("max_list_results", 500), "max_list_results", 1, 2000),
             integer(raw.get("max_task_timeout_seconds", 300), "max_task_timeout_seconds", 1, 900),
-            state.resolve(), raw.get("codex_executable"), runtime_roots,
-            integer(raw.get("completed_changes_to_keep", 30), "completed_changes_to_keep", 1, 300))
+            state.resolve(), codex_executable, runtime_roots,
+            integer(raw.get("completed_changes_to_keep", 30), "completed_changes_to_keep", 1, 300),
+            external_roots)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         if isinstance(exc, BridgeError):
             raise
@@ -163,8 +247,11 @@ class ProjectFiles:
             raise BridgeError("PATH_BLOCKED: protected file or directory.")
         target = self.root / relative
         check_link_chain(target)
-        if not target.resolve().is_relative_to(self.root):
+        resolved = target.resolve()
+        if not resolved.is_relative_to(self.root):
             raise BridgeError("PATH_BLOCKED: path escapes the project.")
+        if any(resolved.is_relative_to(runtime_root) for runtime_root in self.config.runtime_read_roots):
+            raise BridgeError("PATH_BLOCKED: runtime roots are execution-only.")
         if not allow_missing and not target.exists():
             raise BridgeError(f"NOT_FOUND: {relative.as_posix()}")
         return target, relative.as_posix()

@@ -1,10 +1,12 @@
 {
-  "workspace_root": "D:/AI/New folder",
+  "workspace_root": "${PROJECT_ROOT}",
   "max_file_bytes": 2097152,
   "max_list_results": 500,
   "max_task_timeout_seconds": 300,
   "tasks": {
     "git_status": ["git", "status", "--short"],
     "git_diff_check": ["git", "diff", "--check"]
-  }
+  },
+  "runtime_read_roots": [],
+  "external_read_roots": ["H:/AI/Codex-app-tunnel"]
 }

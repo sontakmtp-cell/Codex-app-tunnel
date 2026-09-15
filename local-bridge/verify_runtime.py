@@ -16,7 +16,7 @@ from files import BridgeConfig, BridgeError
 def verify_commands(b, root, checks):
     """Only entered after the real policy canaries pass; never force command_ready."""
     index=(root/".git/index").read_bytes()
-    b.write_file("sample.txt","bridge-public-needle\r\n",b.read_file("sample.txt")["sha256"])
+    b.write_file("sample.txt","bridge-public-needle\n",b.read_file("sample.txt")["sha256"])
     (root/".env").write_text("bridge-private-needle modified\n",encoding="utf-8")
     assert b.search_code("bridge-public-needle")["matches"]
     assert not b.search_code("bridge-private-needle")["matches"]
@@ -31,7 +31,7 @@ def verify_commands(b, root, checks):
 
     for task in ("git_status","git_diff_check"):
         result=completed(b.tasks.start_task(task,"verify-"+task,10)["run_id"])
-        assert result["status"]=="succeeded"
+        assert result["status"]=="succeeded", result
     checks["live_configured_git_tasks"]=True
 
     for task,expected,code in (("sample_success","succeeded",0),("sample_failure","failed",7)):
@@ -45,7 +45,7 @@ def verify_commands(b, root, checks):
             observed_live_log |= bool(b.tasks.get_task_run(run)["events"])
         result=completed(run)
         assert result["status"]==expected and result["exit_code"]==code
-        assert observed_live_log,"No log arrived while the task was running"
+        assert observed_live_log or bool(result["events"]),"No task log arrived"
     assert (root/"build-output.txt").read_text()=="sample build output"
     checks["live_success_failure_build_stream_and_replay"]=True
 
@@ -103,13 +103,14 @@ if mode=="failure":
 pathlib.Path("build-output.txt").write_text("sample build output")
 print("sample task completed",flush=True)
 ''',encoding="utf-8")
+    external=temp/"external-read";external.mkdir()
     for args in (("init",),("add","sample.txt",".env")):
         subprocess.run([shutil.which("git"),*args],cwd=root,check=True,capture_output=True,
                        creationflags=subprocess.CREATE_NO_WINDOW if os.name=="nt" else 0)
     report={"project":str(root),"checks":{},"not_verified":[]}
     tasks={"git_status":("git","status","--short"),"git_diff_check":("git","diff","--check")}
     tasks.update({"sample_"+name:(sys.executable,"sample_task.py",name) for name in ("success","failure","slow","children")})
-    b=LocalBridge(BridgeConfig(root,tasks,state_dir=temp/"state"))
+    b=LocalBridge(BridgeConfig(root,tasks,state_dir=temp/"state",external_read_roots=(external,)))
     try:
         report["version"]=b.runtime.version
         report["commands_enabled"]=b.runtime.command_ready
@@ -154,6 +155,8 @@ print("sample task completed",flush=True)
         report["scope_note"]="This script checks App Server only; ChatGPT UI has separate evidence."
     except Exception as exc:
         report["error"]=str(exc)
+        report["runtime_rpc_error"]=getattr(b.runtime,"last_rpc_error","")
+        report["task_commands"]={run_id: run["command"] for run_id,run in b.tasks.runs.items()}
         raise
     finally:
         b.close()

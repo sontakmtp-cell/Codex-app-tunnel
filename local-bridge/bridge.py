@@ -15,6 +15,21 @@ from runtime import AppServer
 from tasks import TaskRunner
 
 
+def _git_bash_executable():
+    if os.name == "nt":
+        candidates = []
+        for name in ("ProgramFiles", "ProgramFiles(x86)"):
+            base = os.environ.get(name)
+            if base:
+                candidates.append(Path(base) / "Git" / "bin" / "bash.exe")
+    else:
+        candidates = [Path(shutil.which("bash") or "")]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+    raise BridgeError("BASH_UNAVAILABLE: install Git for Windows or configure Git Bash locally.")
+
+
 class LocalBridge(ChangeJournal):
     def __init__(self, config, runtime=None, start_runtime=True):
         super().__init__(config)
@@ -24,7 +39,8 @@ class LocalBridge(ChangeJournal):
             if resolved:
                 parent = Path(resolved).resolve().parent
                 runtime_roots.append(parent.parent if exe == "git" else parent)
-        self.runtime = runtime or AppServer(self.root, self.state, config.codex_executable, runtime_roots)
+        self.runtime = runtime or AppServer(self.root, self.state, config.codex_executable, runtime_roots,
+                                            config.external_read_roots)
         self.tasks = TaskRunner(self, self.runtime)
         self.revision = 0
         self.skills = {}
@@ -55,18 +71,58 @@ class LocalBridge(ChangeJournal):
             self.revision += 1
 
     def project_info(self):
+        mode = getattr(self.runtime, "execution_mode", "normal")
+        ready = self.runtime.can_execute
         return {"workspace_root": self.root.as_posix(), "git_available": shutil.which("git") is not None,
                 "git_repository": git_repository(self.root),
                 "runtime": {"status": self.runtime.status, "version": self.runtime.version,
-                            "error": self.runtime.error, "commands_enabled": self.runtime.command_ready,
+                            "error": self.runtime.error, "mode": mode,
+                            "mode_description": ("Turbo: command/exec dùng toàn quyền; Bash có thể đọc/ghi ngoài project và dùng mạng."
+                                                 if mode == "turbo" else
+                                                 "Normal: chỉ chạy task/lệnh qua policy bridge sau khi doctor đạt."),
+                            "commands_enabled": ready,
+                            "bash_enabled": mode == "turbo" and ready,
                             "command_error": self.runtime.command_error},
                 "capabilities": {"changes": True, "read_file": True, "control_panel": True,
-                    "search": self.runtime.command_ready, "tasks": self.runtime.command_ready,
+                    "search": ready, "tasks": ready, "bash": mode == "turbo" and ready,
                     "watch": self.runtime.status == "connected", "skills": self.runtime.status == "connected",
                     "history": self.runtime.status == "connected", "docs": self.runtime.status == "connected"},
                 "approved_tasks": list(self.config.tasks), "active_run_id": self.active_run,
                 "revision": self.revision, "recovery_conflicts": [dict(r) for r in self.db.execute(
                     "SELECT id,error FROM changes WHERE status='recovery_conflict'")]}
+
+    def set_runtime_mode(self, mode, confirm=False):
+        if type(mode) is not str or mode not in {"normal", "turbo"}:
+            raise BridgeError("INVALID_INPUT: mode must be normal or turbo.")
+        if type(confirm) is not bool:
+            raise BridgeError("INVALID_INPUT: confirm must be boolean.")
+        if mode == "turbo" and not confirm:
+            raise BridgeError("TURBO_CONFIRMATION_REQUIRED: confirm the full-access warning before enabling Turbo.")
+        with self.lock:
+            if self.active_run:
+                raise BridgeError("TASK_BUSY: stop or wait for the active task before changing runtime mode.")
+            if self.runtime.status != "connected":
+                raise BridgeError("RUNTIME_UNAVAILABLE: cannot change mode while Codex App Server is disconnected.")
+            self.runtime.execution_mode = mode
+            return {"mode": mode, "project": self.project_info()}
+
+    def run_bash(self, command, timeout_seconds=120):
+        if not isinstance(command, str) or not 1 <= len(command) <= 20000 or "\x00" in command:
+            raise BridgeError("INVALID_INPUT: command must be 1-20000 characters without NUL bytes.")
+        integer(timeout_seconds, "timeout_seconds", 1, self.config.max_task_timeout_seconds)
+        with self.lock:
+            self._idle()
+            if self.runtime.execution_mode != "turbo":
+                raise BridgeError("TURBO_REQUIRED: enable Turbo in the control panel before running Bash.")
+            self.check_command_paths()
+            bash = _git_bash_executable()
+            result = self.runtime.command([str(bash), "-c", command],
+                                          "bash-" + uuid.uuid4().hex, timeout_seconds, stream=False)
+            stdout, stdout_truncated = _bounded(result.get("stdout") or "")
+            stderr, stderr_truncated = _bounded(result.get("stderr") or "")
+            return {"mode": "turbo", "exit_code": result.get("exitCode"),
+                    "stdout": stdout, "stderr": stderr,
+                    "truncated": stdout_truncated or stderr_truncated}
 
     def check_command_paths(self):
         # Globs are snapshotted by Windows. Reject links/deep trees before each command.

@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sys
 import threading
 import time
 import uuid
@@ -20,17 +21,21 @@ class TaskRunner:
 
     def list_tasks(self):
         return {"tasks": [{"task_id": name, "command": list(argv)} for name, argv in self.owner.config.tasks.items()],
-                "available": self.runtime.command_ready, "unavailable_reason": self.runtime.command_error,
+                "available": self.runtime.can_execute, "unavailable_reason": self.runtime.command_error,
                 "active_run_id": self.owner.active_run}
 
     def _command(self, task_id):
         argv = list(self.owner.config.tasks[task_id])
-        exe = shutil.which(argv[0])
+        if task_id == "git_diff_check":
+            argv = [sys.executable, str(Path(__file__).with_name("git_diff_check.py"))]
+        configured = Path(argv[0])
+        exe = str(configured) if configured.is_absolute() and configured.is_file() else shutil.which(argv[0])
         if not exe or Path(exe).suffix.lower() in {".cmd", ".bat", ".ps1"}:
             raise BridgeError("TASK_UNAVAILABLE: configure the native executable and fixed arguments locally.")
         resolved = Path(exe).resolve()
-        if resolved.is_relative_to(self.owner.root):
-            raise BridgeError("TASK_UNAVAILABLE: the executable must be installed outside the editable project.")
+        if resolved.is_relative_to(self.owner.root) and not any(
+                resolved.is_relative_to(runtime_root) for runtime_root in self.owner.config.runtime_read_roots):
+            raise BridgeError("TASK_UNAVAILABLE: the executable must be outside the project or in runtime_read_roots.")
         argv[0] = str(resolved)
         if resolved.stem.lower() == "git":
             argv[1:1] = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.hooksPath="+os.devnull,
@@ -49,7 +54,7 @@ class TaskRunner:
                     raise BridgeError("IDEMPOTENCY_CONFLICT: request_id already used with another task or timeout.")
                 return self.get_task_run(prior["id"])
             self.owner._idle()
-            if not self.runtime.command_ready:
+            if not self.runtime.can_execute:
                 raise BridgeError("SANDBOX_UNAVAILABLE: " + self.runtime.command_error)
             argv = self._command(task_id)
             self.owner.check_command_paths()
@@ -111,7 +116,13 @@ class TaskRunner:
         timer.start()
         status, code, error = "failed", None, None
         try:
-            result = self.runtime.command(argv, run_id, timeout, stream=True)
+            # ponytail: Windows sandbox rejects streaming; buffer one bounded result and emit it on exit.
+            streaming = os.name != "nt"
+            result = self.runtime.command(argv, run_id, timeout, stream=streaming)
+            if not streaming:
+                with self.owner.lock:
+                    for stream in ("stdout", "stderr"):
+                        self._append(run, stream, result.get(stream) or "", final=True)
             code = result.get("exitCode")
             status = "succeeded" if code == 0 else "failed"
         except BridgeError as exc:

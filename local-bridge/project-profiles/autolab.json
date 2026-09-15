@@ -1,0 +1,7 @@
+{
+  "workspace_root": "H:/AI/autolab",
+  "runtime_read_roots": ["${PROJECT_ROOT}/.venv-paxg"],
+  "tasks": {
+    "pytest": ["${PROJECT_ROOT}/.venv-paxg/Scripts/python.exe", "-m", "pytest", "-p", "no:cacheprovider", "tests/paxg_lab", "src/timesfm3"]
+  }
+}

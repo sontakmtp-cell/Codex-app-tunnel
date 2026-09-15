@@ -1,8 +1,8 @@
 # Local MCP Bridge
 
-Bridge nối ChatGPT Web với project cố định **`D:/AI/New folder`**. ChatGPT trực tiếp viết code; bridge không gọi lượt AI, sinh code hoặc review của Codex. Python và `mcp==1.30.0` vẫn dùng tunnel coding hiện có.
+Bridge nối ChatGPT Web với project được chọn bằng một dòng trong `project-path.txt` (hiện `H:/AI/autolab` chỉ là project kiểm thử). ChatGPT trực tiếp viết code; bridge không gọi lượt AI, sinh code hoặc review của Codex. Lớp MCP dùng Python SDK `mcp==2.2.0`, nói MCP `2026-07-28` và vẫn tương thích client đời 2025.
 
-**Trạng thái nghiệm thu:** xem [ACCEPTANCE.md](ACCEPTANCE.md). Bảng và chức năng đọc/sửa/hoàn tác hoạt động. Windows hiện chưa vượt qua kiểm tra sandbox, nên tìm bằng `rg`, Git diff và chạy task bị khóa. `healthz`/`readyz` của tunnel không chứng nhận quyền chạy lệnh.
+**Trạng thái nghiệm thu:** xem [ACCEPTANCE.md](ACCEPTANCE.md). Bảng và chức năng đọc/sửa/hoàn tác hoạt động. Sau khi đổi profile mạng và đọc ngoài project, phải chạy lại doctor trên tunnel mới; `healthz`/`readyz` không chứng nhận quyền chạy lệnh.
 
 ## Khởi động
 
@@ -14,9 +14,23 @@ Chạy script cũ bằng Windows PowerShell 5.1:
 
 Script tự đọc khóa tunnel hiện có, chạy self-test, kiểm tra App Server rồi mở tunnel. Nếu đúng tunnel coding đã chạy, script báo PID và kết thúc; không mở thêm bridge cùng journal. Không sửa cấu hình Blender/SolidWorks.
 
-Trong ChatGPT, dùng app **Codex app** đã kết nối. Sau khi thay đổi danh sách tool, vào Settings → Apps → Codex app → **Làm mới**. Hỏi: “Đọc project_info rồi mở show_control_panel”. Bảng có ba phần: Đợt sửa, Test/build, Project và kết nối. Các tool dữ liệu cập nhật bảng hiện tại; chỉ `show_control_panel` tạo bảng mới. Xác nhận bắt buộc của ChatGPT vẫn do ChatGPT quản lý.
+Trong ChatGPT, dùng app **Codex app** đã kết nối. Sau khi thay đổi danh sách tool, vào Settings → Apps → Codex app → **Làm mới**. Hỏi: “Đọc project_info rồi mở show_control_panel”. Bảng có chế độ Normal/Turbo cùng các phần Đợt sửa, Test/build và Project/kết nối. Các tool dữ liệu cập nhật bảng hiện tại; chỉ `show_control_panel` tạo bảng mới. Xác nhận bắt buộc của ChatGPT vẫn do ChatGPT quản lý.
 
-Trong Codex desktop, mở cùng `D:/AI/New folder` để xem file. Bảng đọc trạng thái Git hiện tại của folder; diff theo từng đợt sửa dùng được cả khi chưa có Git. Bridge không tự tạo repo hoặc chọn lệnh test/build cho folder này.
+Trong Codex desktop, mở cùng đường dẫn đang hiện trong `project_info` để xem file. Bảng đọc trạng thái Git hiện tại của folder; diff theo từng đợt sửa dùng được cả khi chưa có Git. Bridge không tự tạo repo hoặc chọn lệnh test/build cho folder này.
+
+## Đổi project nhanh
+
+Mặc định, chỉ sửa **một dòng** trong `local-bridge/project-path.txt` rồi chạy lại `start-chatgpt-coding-tunnel.ps1`. Nếu chỉ muốn đổi tạm cho một lần chạy, dùng:
+
+```powershell
+.\start-chatgpt-coding-tunnel.ps1 -ProjectPath 'D:/AI/project-khac'
+```
+
+`config.json` dùng token `${PROJECT_ROOT}` cho `workspace_root`; tunnel tự phát hiện project đổi và khởi động lại đúng bridge. Runtime root dạng token không tồn tại sẽ được bỏ qua, nên project không có môi trường test vẫn đọc/sửa file bình thường. `autolab` hiện chỉ là giá trị kiểm thử.
+
+## Task theo từng project
+
+Task chung nằm trong `config.json`; task riêng nằm ở `local-bridge/project-profiles/`, ngoài project nên ChatGPT không thể tự thêm lệnh. Copy `project-profiles/TEMPLATE.json` thành một file `.json`, sửa `workspace_root`, `runtime_read_roots` và `tasks` một lần cho project mới. Khi `project-path.txt` trỏ tới project đó, bridge tự nạp đúng profile; không cần sửa `config.json` mỗi lần đổi project. Nếu chưa có profile, các thao tác file và task Git chung vẫn dùng được.
 
 ## Xem trước, áp dụng, hoàn tác
 
@@ -58,22 +72,28 @@ Sau sự cố, bridge kiểm tra SHA và tiến độ ghi của từng file đ�
 
 ## Test/build
 
-`list_tasks` hiện chỉ có hai ID giữ nguyên: `git_status`, `git_diff_check`. `start_task(task_id, request_id, timeout_seconds)` trả `run_id` ngay. Dùng `get_task_run(run_id, cursor)` để lấy phần log mới và `stop_task_run(run_id, request_id)` để dừng. `run_task` cũ dùng chung bộ chạy nhưng chờ kết quả đồng bộ.
+`list_tasks` hiện luôn có `git_status`, `git_diff_check`; task riêng xuất hiện từ profile khớp project, ví dụ `pytest` của profile `autolab`. `git_diff_check` chạy helper cố định trong bridge: lấy danh sách file tracked từ index, bỏ các đường dẫn bị policy chặn, rồi gọi `git diff --check` qua App Server nên không đụng `.env`. Task còn lại chạy executable và đối số cố định trong profile; token `${PROJECT_ROOT}` dùng được cho đường dẫn. Tắt cache provider để không ghi vào `.pytest_cache` có ACL riêng của sandbox. `start_task(task_id, request_id, timeout_seconds)` trả `run_id` ngay. Dùng `get_task_run(run_id, cursor)` để lấy phần log mới và `stop_task_run(run_id, request_id)` để dừng. `run_task` cũ dùng chung bộ chạy nhưng chờ kết quả đồng bộ.
 
 Tối đa một task chạy; áp dụng/hoàn tác bị khóa trong lúc chạy. Log có trạng thái, thời gian và mã kết thúc, không tạo phần trăm giả. Bảng lấy trạng thái mỗi 2 giây khi đang hiển thị và có task hoạt động. Log giữ trong bộ nhớ cho 30 lượt gần nhất, giới hạn khoảng 256 KiB; sau restart chỉ còn trạng thái và ID trong SQLite. Timeout tối đa hiện cấu hình là 300 giây. Nếu mất App Server, không tự chạy lại task.
 
-Muốn thêm task về sau, sửa `config.json` **trong máy** với executable đã cài và đối số cố định, rồi khởi động lại. ChatGPT không được thêm lệnh, đổi project, tăng quyền hoặc bật mạng. Trên Windows phải dùng executable thật; bridge từ chối shim `.cmd`, `.bat`, `.ps1`. Mỗi runtime bổ sung phải có đường dẫn đọc tối thiểu trong `runtime_read_roots` và vượt qua doctor trước khi dùng.
+## Chế độ Normal và Turbo
+
+Bridge luôn khởi động ở **Normal**. Normal giữ nguyên policy `bridge`: chỉ task đã cấu hình, search/Git qua App Server, project/cache được ghi, root ngoài chỉ đọc và phải qua doctor. Turbo chỉ bật bằng nút trong bảng sau cảnh báo xác nhận; trạng thái không lưu qua lần khởi động lại.
+
+Khi Turbo bật, `command/exec` dùng policy `dangerFullAccess` theo từng lệnh, nên Bash có thể đọc/ghi ngoài project và dùng mạng. `run_bash(command, timeout_seconds)` chạy bằng Git Bash thật (`Git/bin/bash.exe`) và chỉ hoạt động trong Turbo; đây là lối dành cho skill như `last30days` hoặc task dự án cần Bash. Turbo có thể xóa/sửa dữ liệu ngoài project, vì vậy chỉ bật khi thật sự cần. Môi trường kế thừa vẫn được làm sạch để không tự truyền khóa tunnel/API vào tiến trình.
+
+Muốn đổi project, sửa `local-bridge/project-path.txt` hoặc dùng `-ProjectPath`; chỉ sửa profile riêng một lần khi project có task/build mới. Trong Normal, ChatGPT không được thêm lệnh, đổi project, đổi root đọc hoặc thay policy mạng. Turbo là ngoại lệ do Khầy bật trực tiếp trong bảng. Trên Windows phải dùng executable thật; bridge từ chối shim `.cmd`, `.bat`, `.ps1`. Executable trong project chỉ được phép nếu nằm trong `runtime_read_roots` đã allowlist; `external_read_roots` là các thư mục ngoài project chỉ được đọc bởi App Server, không được là project hoặc thư mục cha của project và không được chồng lấn. Cả hai nhóm phải vượt qua doctor trước khi dùng Normal.
 
 ## Quyền và phạm vi
 
 - App Server là tiến trình ẩn riêng qua STDIO, được bridge sở hữu cùng các tiến trình con bằng Windows Job Object. Đóng bridge sẽ đóng nhóm riêng này.
-- Các lệnh chỉ dùng profile `bridge`: project/cache được ghi, runtime cần thiết được đọc, mạng mặc định tắt. Nếu kiểm tra thực tế thất bại, bridge từ chối chạy lệnh; không có chế độ chạy không bảo vệ dự phòng.
+- Normal chỉ dùng profile `bridge`: project/cache được ghi; `runtime_read_roots` và `external_read_roots` chỉ được đọc; mạng ra ngoài được bật cố định cho task đã cấu hình. Doctor phải thấy `outside_blocked=false`, `network_blocked=false` và `key_absent=true`; nếu thất bại, Normal từ chối chạy lệnh, không có fallback không bảo vệ. Turbo là ngoại lệ có chủ ý, được bật bằng xác nhận UI và dùng policy toàn quyền theo từng lệnh.
 - Không truyền khóa tunnel vào App Server/task. Không lưu nội dung file hoặc lịch sử đầy đủ vào log chẩn đoán. Nhật ký thay đổi riêng vẫn cần lưu bản trước/sau để hoàn tác.
 - Đọc/tìm/diff cùng chặn `.env`, khóa/certificate, cấu hình nhạy cảm, file nhị phân, đường dẫn thoát project, Windows ADS, symlink/junction và hardlink không an toàn. Quản lý quyền file không phụ thuộc vào sandbox của lệnh.
 - Chỉ hai tool `openaiDeveloperDocs` được gọi qua `mcpServer/tool/call`. MCP/plugin khác bị tắt bằng tham số của tiến trình bridge; cấu hình Codex toàn cục không đổi. Ngữ cảnh kỹ thuật tạm không có lượt sinh code.
-- `list_skills` tìm skill; chỉ đọc tài liệu trong thư mục skill đã được xác định. Hướng dẫn skill không cấp quyền chạy script.
+- `list_skills` tìm skill; chỉ đọc tài liệu trong thư mục skill đã được xác định. Hướng dẫn skill không cấp quyền trong Normal; skill cần chạy script phải được người dùng bật Turbo rồi dùng `run_bash`.
 - Chỉ liệt kê/đọc hội thoại Codex có `cwd` đúng project, theo yêu cầu. Không đọc task khác, tiếp tục task cũ hoặc xuất toàn bộ kết quả tool riêng tư.
-- Bảng dùng MCP Apps resource `ui://local-bridge/control-panel-v1.html`, không có frontend build hoặc cổng HTTP riêng. Code/log được hiển thị bằng văn bản.
+- Bảng dùng MCP Apps resource `ui://local-bridge/control-panel-v2.html`, có trạng thái tổng quan, diff, log và task progress dạng indeterminate; không có frontend build hoặc cổng HTTP riêng. Code/log được hiển thị bằng văn bản.
 
 ## Kiểm tra trong máy
 
@@ -81,8 +101,8 @@ Self-test dùng project mẫu riêng, không thay đổi project của Khầy:
 
 ```powershell
 Set-Location -LiteralPath 'D:\AI\tunnel-client-v0.0.14-windows-arm64'
-uv run --with mcp==1.30.0 --python 3.13 local-bridge/server.py --self-test
-uv run --with mcp==1.30.0 --python 3.13 local-bridge/verify_runtime.py
+uv run --with mcp==2.2.0 --python 3.13 local-bridge/server.py --self-test
+uv run --with mcp==2.2.0 --python 3.13 local-bridge/verify_runtime.py
 ```
 
 Self-test kiểm tra logic và nhóm tiến trình Windows; các bài dùng runtime giả **không** chứng nhận sandbox của App Server. `verify_runtime.py` kiểm tra App Server thật trên project mẫu. Mã kết thúc 2 nghĩa là phần chạy lệnh chưa đạt; khi chạy qua `uv`, công cụ ngoài có thể báo mã 1.
