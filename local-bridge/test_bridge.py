@@ -16,6 +16,7 @@ import unittest
 from bridge import LocalBridge
 from files import BridgeConfig, BridgeError, ChangeJournal, _sha256, load_config
 from runtime import ALLOWED_METHODS, AppServer, clean_environment, process_overrides
+from session import WorkspaceSession
 
 
 class FakeRuntime:
@@ -54,6 +55,9 @@ class FakeRuntime:
     def close(self):
         self.release.set()
         self.status="stopped"
+
+    def terminate(self, process_id):
+        return self.call("command/exec/terminate", {"processId":process_id})
 
 
 class BridgeTests(unittest.TestCase):
@@ -245,6 +249,10 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(result["status"],"stopped")
         text=json.dumps(result)
         self.assertNotIn("do-not-",text);self.assertIn("REDACTED",text)
+        logs=self.b.tasks.runs[run]
+        self.b.tasks._append(logs,"stdout","x"*300000+"\n")
+        self.assertLessEqual(logs["chars"],262144)
+        self.assertTrue(logs["truncated"])
         self.assertEqual(len([m for m,_ in self.runtime.calls if m=="command/exec"]),1)
         self.b.apply_changes(c,"apply-001")
 
@@ -275,10 +283,13 @@ class BridgeTests(unittest.TestCase):
     def test_command_timeout_closes_owned_runtime(self):
         runtime=AppServer(self.root,self.home/"state")
         runtime.command_ready=True
-        def rejected(*args,**kwargs):raise BridgeError("RUNTIME_TIMEOUT: result unknown")
+        def rejected(method,params,**kwargs):
+            self.assertNotIn("outputBytesCap",params)
+            self.assertEqual(params["permissionProfile"],"bridge")
+            raise BridgeError("RUNTIME_TIMEOUT: result unknown")
         runtime.call=rejected
         with self.assertRaisesRegex(BridgeError,"RUNTIME_TIMEOUT"):
-            runtime.command([sys.executable],"unknown-run",1)
+            runtime.command([sys.executable],"unknown-run",1,stream=False)
         self.assertFalse(runtime.command_ready)
         self.assertEqual(runtime.status,"stopped")
 
@@ -356,6 +367,13 @@ class BridgeTests(unittest.TestCase):
     def test_environment_and_config_boundary(self):
         self.assertFalse(self.b.project_info()["git_repository"])
         overrides=process_overrides(self.root,self.home/"cache",[])
+        self.assertIn("features.plugins=false",overrides)
+        self.assertIn("features.hooks=false",overrides)
+        self.assertIn("permissions.bridge.network.enabled=true",overrides)
+        self.assertIn("features.network_proxy=false",overrides)
+        for name in ("USERNAME","USERDOMAIN"):
+            if name in os.environ:
+                self.assertEqual(clean_environment(self.home)[name],os.environ[name])
         filesystem=next(v for v in overrides if v.startswith("permissions.bridge.filesystem="))
         self.assertNotIn(json.dumps(str(self.root/".git"))+"=",filesystem)
         (self.root/".git").mkdir()
@@ -374,7 +392,7 @@ class BridgeTests(unittest.TestCase):
     def test_mcp_schema_and_ui_contract(self):
         import server
         tools=asyncio.run(server.mcp.list_tools())
-        self.assertEqual(len(tools),25)
+        self.assertEqual(len(tools),31)
         linked=[t.name for t in tools if (t.meta or {}).get("ui",{}).get("resourceUri")]
         self.assertEqual(linked,["show_control_panel"])
         self.runtime.command_ready=False
@@ -382,7 +400,9 @@ class BridgeTests(unittest.TestCase):
         self.assertTrue(panel["panel_available"])
         self.assertFalse(panel["task_state"]["available"])
         names={t.name:t for t in tools}
-        self.assertEqual(list(names["run_task"].inputSchema["properties"]),["task_id","timeout_seconds"])
+        self.assertEqual(list(names["run_task"].inputSchema["properties"]),["task_id","timeout_seconds","context_id"])
+        for name in ("set_runtime_mode", "select_workspace"):
+            self.assertEqual(names[name].meta["ui"]["visibility"], ["app"])
         self.assertTrue(all(t.annotations and t.outputSchema for t in tools))
         contents=list(asyncio.run(server.mcp.read_resource(server.UI_URI)))
         self.assertEqual(contents[0].mime_type,"text/html;profile=mcp-app")
@@ -391,6 +411,101 @@ class BridgeTests(unittest.TestCase):
             self.assertIn(required,html)
         for unsafe in ("innerHTML","eval(","http://localhost","<script src="):
             self.assertNotIn(unsafe,html)
+
+    def test_turbo_command_gate_and_replay(self):
+        command=[sys.executable,"-c","print('turbo')"]
+        with self.assertRaisesRegex(BridgeError,"MODE_REQUIRED"):
+            self.b.tasks.execute_command(command,"turbo-command-1")
+        self.b.config=replace(self.config,mode="turbo")
+        first=self.b.tasks.execute_command(command,"turbo-command-1")
+        self.assertEqual(first["run_id"],self.b.tasks.execute_command(command,"turbo-command-1")["run_id"])
+        with self.assertRaisesRegex(BridgeError,"IDEMPOTENCY_CONFLICT"):
+            self.b.tasks.execute_command([sys.executable,"-c","print('different')"],"turbo-command-1")
+        with self.assertRaisesRegex(BridgeError,"TASK_BUSY"):
+            self.b.write_file("blocked.txt","busy")
+        self.b.tasks.stop_task_run(first["run_id"],"turbo-command-stop")
+        self.assertTrue(self.b.tasks.runs[first["run_id"]]["done"].wait(3))
+
+    def test_workspace_switch_scopes_journals_and_inflight_calls(self):
+        self.b.close()
+        config=self.home/"selection-config.json"
+        config.write_text(json.dumps({"workspace_root":str(self.root),"state_dir":str(self.home/"selected-state"),
+                                      "tasks":{"sample_test":[sys.executable,"sample.py"]}}))
+        second=self.home/"second project";second.mkdir()
+        session=WorkspaceSession(config,lambda c:LocalBridge(c,FakeRuntime(c.workspace_root)))
+        try:
+            initial=session.info()["context_id"]
+            change=session.current.prepare_changes("first root",[{"path":"unique.txt","content":"root one"}],"scope-prepare-1")
+            with session.use(initial,True):
+                with self.assertRaisesRegex(BridgeError,"TASK_BUSY"):
+                    session.switch(initial,workspace_root=str(second))
+            switched=session.switch(initial,workspace_root=str(second))
+            with self.assertRaisesRegex(BridgeError,"CONTEXT_CHANGED"):
+                with session.use(initial,True):pass
+            with self.assertRaisesRegex(BridgeError,"NOT_FOUND"):
+                session.current.apply_changes(change["change_id"],"wrong-root-apply")
+            self.assertNotIn("sample_test",switched["approved_tasks"])
+            self.assertFalse((second/"unique.txt").exists())
+            restored=session.switch(switched["context_id"],workspace_root=str(self.root))
+            session.current.apply_changes(change["change_id"],"right-root-apply")
+            self.assertEqual((self.root/"unique.txt").read_text(),"root one")
+            run=session.current.tasks.start_task("sample_test","switch-busy-task")
+            with self.assertRaisesRegex(BridgeError,"TASK_BUSY"):
+                session.switch(restored["context_id"],mode="turbo")
+            session.current.tasks.stop_task_run(run["run_id"],"switch-busy-stop")
+            self.assertTrue(session.current.tasks.runs[run["run_id"]]["done"].wait(3))
+            for target in (self.home, Path(__file__).resolve().parent.parent, session.selection.parent):
+                with self.assertRaisesRegex(BridgeError,"WORKSPACE_DENIED"):
+                    session.switch(restored["context_id"],workspace_root=str(target))
+        finally:
+            session.close()
+            self.b=LocalBridge(self.config,FakeRuntime(self.root))
+
+    def test_turbo_mcp_call_is_exact_and_not_replayed(self):
+        with self.assertRaisesRegex(BridgeError,"MODE_REQUIRED"):
+            self.b.call_mcp_tool("id",{},"mcp-call-1")
+        self.b.config=replace(self.config,mode="turbo")
+        self.b.docs_thread="technical-context"
+        self.b.mcp_tools={"known":{"server":"installed","name":"selected"}}
+        calls=[]
+        def rpc(method,params,timeout=30):
+            calls.append((method,params))
+            return {"content":[{"type":"text","text":"done"}]}
+        self.runtime.call=rpc
+        first=self.b.call_mcp_tool("known",{"x":1},"mcp-call-1")
+        self.assertEqual(first,self.b.call_mcp_tool("known",{"x":1},"mcp-call-1"))
+        self.assertEqual(len(calls),1)
+        self.assertEqual(calls[0][1]["server"],"installed")
+        with self.assertRaisesRegex(BridgeError,"IDEMPOTENCY_CONFLICT"):
+            self.b.call_mcp_tool("known",{"x":2},"mcp-call-1")
+        with self.assertRaisesRegex(BridgeError,"SCOPE_DENIED"):
+            self.b.call_mcp_tool("not-discovered",{},"mcp-call-2")
+        def lost(*args,**kwargs):raise BridgeError("RUNTIME_TIMEOUT")
+        self.runtime.call=lost
+        with self.assertRaisesRegex(BridgeError,"RUNTIME_TIMEOUT"):
+            self.b.call_mcp_tool("known",{},"mcp-call-lost")
+        with self.assertRaisesRegex(BridgeError,"RESULT_UNKNOWN"):
+            self.b.call_mcp_tool("known",{},"mcp-call-lost")
+
+    def test_turbo_profile_keeps_write_boundary(self):
+        runtime=AppServer(self.root,self.home/"state",mode="turbo")
+        self.assertTrue(runtime.cache.is_relative_to(self.root))
+        overrides=process_overrides(self.root,runtime.cache,[],"turbo",runtime.state)
+        self.assertIn("features.plugins=true",overrides)
+        self.assertIn("features.apps=true",overrides)
+        self.assertIn("windows.sandbox=\"elevated\"",overrides)
+        self.assertFalse(any(x.startswith("mcp_servers=") for x in overrides))
+        filesystem=next(v for v in overrides if v.startswith("permissions.bridge.filesystem="))
+        self.assertIn(json.dumps(str(runtime.state))+"=\"deny\"",filesystem)
+        self.assertIn('\":root\"=\"read\"',filesystem)
+        self.b.config=replace(self.config,mode="turbo")
+        with self.assertRaises(BridgeError):self.b.write_file("../outside.txt","denied")
+        outside=self.home/"outside.txt";outside.write_text("outside read")
+        self.assertEqual(self.b.read_file(str(outside))["content"],"outside read")
+        with self.assertRaises(BridgeError):self.b.write_file(str(outside),"denied")
+        with self.assertRaises(BridgeError):self.b.read_file(str(self.b.state/"journal.sqlite3"))
+        self.b.write_file(".env.local","USER_SUPPLIED_EXAMPLE=yes")
+        self.assertTrue((self.root/".env.local").is_file())
 
 
 def run_tests():

@@ -16,7 +16,7 @@ from files import BridgeConfig, BridgeError
 def verify_commands(b, root, checks):
     """Only entered after the real policy canaries pass; never force command_ready."""
     index=(root/".git/index").read_bytes()
-    b.write_file("sample.txt","bridge-public-needle\r\n",b.read_file("sample.txt")["sha256"])
+    b.write_file("sample.txt","bridge-public-needle\n",b.read_file("sample.txt")["sha256"])
     (root/".env").write_text("bridge-private-needle modified\n",encoding="utf-8")
     assert b.search_code("bridge-public-needle")["matches"]
     assert not b.search_code("bridge-private-needle")["matches"]
@@ -25,14 +25,25 @@ def verify_commands(b, root, checks):
     assert (root/".git/index").read_bytes()==index
     checks["live_search_diff_privacy_and_git_index"]=True
 
+    # The privacy fixture deliberately tracks .env; a whole-repo Git check must
+    # refuse that read. Untrack only this synthetic file for the ordinary task checks.
+    subprocess.run([shutil.which("git"), "update-index", "--force-remove", "--", ".env"],
+                   cwd=root,check=True,capture_output=True,creationflags=subprocess.CREATE_NO_WINDOW)
+
     def completed(run_id):
         assert b.tasks.runs[run_id]["done"].wait(18),"Task did not terminate"
         return b.tasks.get_task_run(run_id)
 
     for task in ("git_status","git_diff_check"):
         result=completed(b.tasks.start_task(task,"verify-"+task,10)["run_id"])
-        assert result["status"]=="succeeded"
+        assert result["status"]=="succeeded", result
     checks["live_configured_git_tasks"]=True
+
+    result=completed(b.tasks.start_task("sample_policy","verify-child-policy",10)["run_id"])
+    assert result["status"]=="succeeded",result
+    child_checks=json.loads("".join(event["text"] for event in result["events"] if event["stream"]=="stdout"))
+    assert child_checks=={"secret_blocked":True,"outside_write_blocked":True,"key_absent":True,"external_network_allowed":True}
+    checks["live_task_child_permissions"]=child_checks
 
     for task,expected,code in (("sample_success","succeeded",0),("sample_failure","failed",7)):
         started=time.monotonic()
@@ -44,7 +55,7 @@ def verify_commands(b, root, checks):
         while not b.tasks.runs[run]["done"].wait(.05) and time.monotonic()<deadline:
             observed_live_log |= bool(b.tasks.get_task_run(run)["events"])
         result=completed(run)
-        assert result["status"]==expected and result["exit_code"]==code
+        assert result["status"]==expected and result["exit_code"]==code, result
         assert observed_live_log,"No log arrived while the task was running"
     assert (root/"build-output.txt").read_text()=="sample build output"
     checks["live_success_failure_build_stream_and_replay"]=True
@@ -72,6 +83,7 @@ def verify_commands(b, root, checks):
     handle=kernel.OpenProcess(0x100000,False,child_pid)
     assert handle and kernel.WaitForSingleObject(handle,0)==258
     try:
+        assert kernel.WaitForSingleObject(handle,11000)==258,"Task stopped before Stop or its configured timeout"
         b.tasks.stop_task_run(run,"verify-stop-001")
         b.tasks.stop_task_run(run,"verify-stop-001")
         assert completed(run)["status"]=="stopped"
@@ -88,14 +100,27 @@ def main():
     root=temp/"project with spaces";root.mkdir()
     (root/"sample.txt").write_bytes("Khầy\r\nkiểm thử\r\n".encode())
     (root/".env").write_text("bridge-private-needle\n",encoding="utf-8")
-    (root/"sample_task.py").write_text('''import pathlib,subprocess,sys,time
+    (temp/"outside-canary.txt").write_text("synthetic outside data",encoding="utf-8")
+    (root/"sample_task.py").write_text('''import json,os,pathlib,socket,subprocess,sys,time
 mode=sys.argv[1]
+if mode=="policy":
+    checks={}
+    try:pathlib.Path(".env").read_bytes();checks["secret_blocked"]=False
+    except PermissionError:checks["secret_blocked"]=True
+    try:pathlib.Path("../outside-canary.txt").write_text("canary write");checks["outside_write_blocked"]=False
+    except PermissionError:checks["outside_write_blocked"]=True
+    checks["key_absent"]=not any(any(word in name.upper() for word in ("API_KEY","TOKEN","SECRET","PASSWORD")) for name in os.environ)
+    with socket.create_connection(("1.1.1.1",443),5):checks["external_network_allowed"]=True
+    print(json.dumps(checks),flush=True)
+    sys.exit(0 if all(checks.values()) else 1)
 if mode=="children":
     child=subprocess.Popen([sys.executable,__file__,"slow"])
     pathlib.Path("child.pid").write_text(str(child.pid))
 print("sample task started",flush=True)
 if mode in ("children","slow"):
-    while True:time.sleep(.2)
+    while True:
+        print("sample task heartbeat",flush=True)
+        time.sleep(1)
 time.sleep(1)
 if mode=="failure":
     print("expected fixture failure",file=sys.stderr,flush=True)
@@ -108,7 +133,7 @@ print("sample task completed",flush=True)
                        creationflags=subprocess.CREATE_NO_WINDOW if os.name=="nt" else 0)
     report={"project":str(root),"checks":{},"not_verified":[]}
     tasks={"git_status":("git","status","--short"),"git_diff_check":("git","diff","--check")}
-    tasks.update({"sample_"+name:(sys.executable,"sample_task.py",name) for name in ("success","failure","slow","children")})
+    tasks.update({"sample_"+name:(sys.executable,"sample_task.py",name) for name in ("success","failure","slow","children","policy")})
     b=LocalBridge(BridgeConfig(root,tasks,state_dir=temp/"state"))
     try:
         report["version"]=b.runtime.version
@@ -144,6 +169,7 @@ print("sample task completed",flush=True)
         report["checks"]["only_approved_mcp_tools"]=(set(enabled)=={"openaiDeveloperDocs"} and
             set(enabled["openaiDeveloperDocs"])=={"search_openai_docs","fetch_openai_doc"})
         report["callable_mcp_tools"]=enabled
+        assert report["checks"]["only_approved_mcp_tools"], "An unapproved MCP was enabled"
         if not b.runtime.command_ready:
             try:b.tasks.start_task("git_status","verify-start-task")
             except BridgeError as e:report["checks"]["task_fails_closed"]=str(e).startswith("SANDBOX_UNAVAILABLE")
@@ -151,9 +177,12 @@ print("sample task completed",flush=True)
             report["not_verified"] += ["Live protected test/build, streaming, timeout and descendant termination", "Live rg and Git diff through App Server"]
         else:
             verify_commands(b,root,report["checks"])
+        assert all(value is True or isinstance(value,dict) and value and all(v is True for v in value.values())
+                   for value in report["checks"].values()),"A required runtime check failed"
         report["scope_note"]="This script checks App Server only; ChatGPT UI has separate evidence."
     except Exception as exc:
         report["error"]=str(exc)
+        report["runtime_error"]=getattr(b.runtime,"last_rpc_error",None)
         raise
     finally:
         b.close()

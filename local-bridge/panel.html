@@ -1,156 +1,1458 @@
 <!doctype html>
-<html lang="vi">
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Local MCP Bridge</title>
-<style>
-  :root{color-scheme:light dark;font:14px/1.5 system-ui,sans-serif;--line:#8885;--muted:#71717a;--accent:#087f74}
-  *{box-sizing:border-box}body{margin:0;padding:18px;color:var(--color-text-primary,CanvasText);background:var(--color-background-primary,Canvas)}
-  header,.row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}header{justify-content:space-between}h1{font-size:19px;margin:0}h2{font-size:16px;margin:0 0 12px}
-  section{border:1px solid var(--line);border-radius:12px;padding:16px;margin-top:16px}p{margin:8px 0}.muted{color:var(--color-text-secondary,var(--muted));font-size:12px}
-  button,select{font:inherit;border:1px solid var(--line);border-radius:7px;padding:7px 11px;background:var(--color-background-secondary,Canvas);color:inherit;max-width:100%}
-  button{cursor:pointer}button:disabled{opacity:.45;cursor:default}button.primary{background:var(--accent);color:white;border-color:var(--accent)}button.danger{color:#c43838}
-  button:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:3px}select{flex:1;min-width:120px}
-  pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:320px;overflow:auto;border:1px solid var(--line);border-radius:7px;padding:12px;font:12px/1.55 ui-monospace,Consolas,monospace}
-  #error{color:#bd3030;white-space:pre-wrap}#connection{font-size:12px;padding:3px 9px;border:1px solid var(--line);border-radius:20px}#projectPath{overflow-wrap:anywhere}
-  label{font-size:12px}#fileSelect{width:100%;margin:8px 0}.hidden{display:none}@media(max-width:450px){body{padding:10px}section{padding:12px}.row button{flex:1}}
-</style>
-<header><h1>Local MCP Bridge</h1><span id="connection" role="status">Đang kết nối…</span></header>
-<p id="error" role="alert"></p>
-<section aria-labelledby="changesTitle">
-  <h2 id="changesTitle">Đợt sửa</h2>
-  <div class="row"><label for="changeSelect">Chọn đợt</label><select id="changeSelect"><option value="">Chưa có đợt sửa</option></select><button id="refresh">Làm mới</button></div>
-  <p id="changeStatus" class="muted">Chuẩn bị thay đổi trong hội thoại để xem diff ở đây.</p>
-  <label for="fileSelect">File trong đợt sửa</label><select id="fileSelect"><option value="">Tất cả file</option></select>
-  <pre id="diff" aria-label="Nội dung diff">Chưa chọn đợt sửa.</pre>
-  <button id="moreDiff" class="hidden">Đọc tiếp diff</button>
-  <div class="row"><button id="apply" class="primary" disabled>Áp dụng đợt sửa</button><button id="undo" disabled>Hoàn tác đợt sửa</button></div>
-</section>
-<section aria-labelledby="taskTitle">
-  <h2 id="taskTitle">Test/build</h2>
-  <div class="row"><label for="taskSelect">Task</label><select id="taskSelect"></select><button id="start" disabled>Chạy</button><button id="stop" class="danger" disabled>Dừng</button></div>
-  <p id="taskStatus" role="status">Chưa có task chạy.</p><p id="taskNote" class="muted"></p>
-  <pre id="logs" aria-label="Log task" aria-live="off">Log sẽ xuất hiện ở đây.</pre>
-</section>
-<section aria-labelledby="projectTitle">
-  <h2 id="projectTitle">Project và kết nối</h2>
-  <p id="projectPath">Đang tải project…</p><p id="projectDetails" class="muted"></p>
-  <p class="muted">Mở cùng thư mục này trong Codex desktop để xem file. Diff và hoàn tác từng đợt dùng được cả khi thư mục chưa có Git.</p>
-</section>
-<script>
-(() => {
-  "use strict";
-  const $ = id => document.getElementById(id), pending = new Map();
-  const statuses = {prepared:"Đang chờ áp dụng",applied:"Đã áp dụng",undone:"Đã hoàn tác",applying:"Đang ghi",undoing:"Đang hoàn tác",recovered:"Đã phục hồi sau lỗi",recovery_conflict:"Cần xử lý xung đột",undo_failed:"Hoàn tác lỗi, đã phục hồi",expired:"Đã hết thời hạn lưu bản sao",running:"Đang chạy",succeeded:"Thành công",failed:"Thất bại",stopped:"Đã dừng",timed_out:"Hết thời gian",runtime_lost:"Mất kết nối bộ chạy"};
-  let connected=false, disposed=false, visible=true, hostOrigin=null, project=null, change=null, runId=null, cursor=0, timer=null, polling=false, busy=false, nextDiff=null, pendingStart=null;
-  const notify=(method,params)=>parent.postMessage({jsonrpc:"2.0",method,params},hostOrigin || "*");
-  function rpc(method,params){
-    return new Promise((resolve,reject)=>{
-      const id=crypto.randomUUID(), timeout=setTimeout(()=>{pending.delete(id);reject(new Error("Kết nối hết thời gian. Thao tác chưa được tự chạy lại; bấm Làm mới để kiểm tra."));},60000);
-      pending.set(id,{resolve,reject,timeout});parent.postMessage({jsonrpc:"2.0",id,method,params},hostOrigin || "*");
+<html lang="vi" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Local MCP Bridge</title>
+  <style>
+    :root {
+      color-scheme: dark light;
+      --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, -apple-system, "Helvetica Neue", Arial, sans-serif;
+      --font-mono: "JetBrains Mono", "Cascadia Code", "Fira Code", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+      /* Dark theme defaults */
+      --bg-body: #090d16;
+      --bg-card: #101726;
+      --bg-card-subtle: #162034;
+      --bg-input: #0c121e;
+      --border-color: #1e2c44;
+      --border-hover: #314364;
+      --border-focus: #6366f1;
+      
+      --text-main: #f8fafc;
+      --text-sub: #cbd5e1;
+      --text-muted: #94a3b8;
+      
+      --accent: #6366f1;
+      --accent-hover: #4f46e5;
+      --accent-glow: rgba(99, 102, 241, 0.25);
+      
+      --success: #10b981;
+      --success-bg: rgba(16, 185, 129, 0.12);
+      --success-border: rgba(16, 185, 129, 0.3);
+      --success-text: #34d399;
+
+      --danger: #f43f5e;
+      --danger-bg: rgba(244, 63, 94, 0.12);
+      --danger-border: rgba(244, 63, 94, 0.3);
+      --danger-text: #fb7185;
+      --danger-hover: rgba(244, 63, 94, 0.22);
+
+      --warning: #f59e0b;
+      --warning-bg: rgba(245, 158, 11, 0.12);
+      --warning-border: rgba(245, 158, 11, 0.3);
+      --warning-text: #fbbf24;
+
+      --code-bg: #070a12;
+      --code-border: #182236;
+      --code-text: #e2e8f0;
+
+      --diff-add-bg: rgba(16, 185, 129, 0.16);
+      --diff-add-text: #34d399;
+      --diff-del-bg: rgba(244, 63, 94, 0.18);
+      --diff-del-text: #fb7185;
+      --diff-hunk-bg: rgba(99, 102, 241, 0.16);
+      --diff-hunk-text: #a5b4fc;
+      --diff-header-text: #64748b;
+
+      --shadow-card: 0 4px 20px -2px rgba(0, 0, 0, 0.45);
+      --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.2);
+    }
+
+    [data-theme="light"] {
+      color-scheme: light;
+      --bg-body: #f8fafc;
+      --bg-card: #ffffff;
+      --bg-card-subtle: #f1f5f9;
+      --bg-input: #ffffff;
+      --border-color: #e2e8f0;
+      --border-hover: #cbd5e1;
+      --border-focus: #4f46e5;
+      
+      --text-main: #0f172a;
+      --text-sub: #334155;
+      --text-muted: #64748b;
+      
+      --accent: #4f46e5;
+      --accent-hover: #4338ca;
+      --accent-glow: rgba(79, 70, 229, 0.2);
+      
+      --success: #059669;
+      --success-bg: #ecfdf5;
+      --success-border: #a7f3d0;
+      --success-text: #059669;
+
+      --danger: #e11d48;
+      --danger-bg: #fff1f2;
+      --danger-border: #fecdd3;
+      --danger-text: #e11d48;
+      --danger-hover: #ffe4e6;
+
+      --warning: #d97706;
+      --warning-bg: #fffbeb;
+      --warning-border: #fde68a;
+      --warning-text: #b45309;
+
+      --code-bg: #090d16;
+      --code-border: #1e293b;
+      --code-text: #f1f5f9;
+
+      --diff-add-bg: rgba(16, 185, 129, 0.16);
+      --diff-add-text: #34d399;
+      --diff-del-bg: rgba(244, 63, 94, 0.18);
+      --diff-del-text: #fb7185;
+      --diff-hunk-bg: rgba(99, 102, 241, 0.16);
+      --diff-hunk-text: #818cf8;
+      --diff-header-text: #94a3b8;
+
+      --shadow-card: 0 4px 20px -2px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.04);
+      --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 24px 20px;
+      font-family: var(--font-sans);
+      font-size: 14px;
+      line-height: 1.5;
+      color: var(--text-main);
+      background-color: var(--bg-body);
+      transition: background-color 0.2s ease, color 0.2s ease;
+      min-height: 100vh;
+    }
+
+    .container {
+      max-width: 860px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    /* Header */
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+      padding-bottom: 4px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .brand-logo {
+      width: 38px;
+      height: 38px;
+      border-radius: 11px;
+      background: linear-gradient(135deg, var(--accent) 0%, #a855f7 100%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #ffffff;
+      box-shadow: 0 2px 10px var(--accent-glow);
+      flex-shrink: 0;
+    }
+
+    .brand-info h1 {
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin: 0;
+      color: var(--text-main);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .brand-info .subhead {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin: 2px 0 0;
+    }
+
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    /* Status Pill */
+    #connection {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      font-size: 12px;
+      font-weight: 500;
+      padding: 5px 12px;
+      border-radius: 9999px;
+      border: 1px solid var(--border-color);
+      background: var(--bg-card);
+      color: var(--text-sub);
+      transition: all 0.2s ease;
+    }
+
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #94a3b8;
+      position: relative;
+    }
+
+    #connection[data-state="connected"] {
+      background: var(--success-bg);
+      border-color: var(--success-border);
+      color: var(--success-text);
+    }
+    #connection[data-state="connected"] .status-dot {
+      background: var(--success);
+      box-shadow: 0 0 8px var(--success);
+    }
+    #connection[data-state="connected"] .status-dot::after {
+      content: "";
+      position: absolute;
+      inset: -2px;
+      border-radius: 50%;
+      background: inherit;
+      animation: statusPulse 2s infinite ease-in-out;
+    }
+
+    #connection[data-state="error"] {
+      background: var(--danger-bg);
+      border-color: var(--danger-border);
+      color: var(--danger-text);
+    }
+    #connection[data-state="error"] .status-dot {
+      background: var(--danger);
+    }
+
+    #connection[data-state="connecting"] {
+      background: var(--warning-bg);
+      border-color: var(--warning-border);
+      color: var(--warning-text);
+    }
+    #connection[data-state="connecting"] .status-dot {
+      background: var(--warning);
+    }
+
+    @keyframes statusPulse {
+      0% { transform: scale(1); opacity: 0.6; }
+      50% { transform: scale(2.2); opacity: 0; }
+      100% { transform: scale(1); opacity: 0; }
+    }
+
+    /* Theme Toggle */
+    .btn-theme {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      color: var(--text-sub);
+      border-radius: 9px;
+      padding: 6px 9px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.15s ease;
+    }
+    .btn-theme:hover {
+      border-color: var(--border-hover);
+      color: var(--text-main);
+      background: var(--bg-card-subtle);
+    }
+    [data-theme="dark"] .btn-theme .sun-icon { display: block; }
+    [data-theme="dark"] .btn-theme .moon-icon { display: none; }
+    [data-theme="light"] .btn-theme .sun-icon { display: none; }
+    [data-theme="light"] .btn-theme .moon-icon { display: block; }
+
+    /* Demo Banner */
+    .demo-banner {
+      background: linear-gradient(90deg, rgba(99, 102, 241, 0.12) 0%, rgba(168, 85, 247, 0.12) 100%);
+      border: 1px solid rgba(99, 102, 241, 0.35);
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-size: 13px;
+      color: var(--text-main);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .demo-badge {
+      background: var(--accent);
+      color: #ffffff;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 7px;
+      border-radius: 5px;
+      letter-spacing: 0.02em;
+      flex-shrink: 0;
+    }
+
+    /* Error alert */
+    #error {
+      margin: 0;
+      padding: 12px 16px;
+      background: var(--danger-bg);
+      border: 1px solid var(--danger-border);
+      border-radius: 10px;
+      color: var(--danger-text);
+      font-size: 13px;
+      line-height: 1.5;
+      word-break: break-word;
+      white-space: pre-wrap;
+    }
+    #error:empty, #error.hidden {
+      display: none;
+    }
+
+    /* Cards / Sections */
+    section {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 14px;
+      padding: 20px;
+      box-shadow: var(--shadow-card);
+      transition: border-color 0.15s ease, box-shadow 0.15s ease;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin: 0;
+    }
+
+    .section-title-wrap {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .section-icon {
+      width: 28px;
+      height: 28px;
+      border-radius: 8px;
+      background: var(--bg-card-subtle);
+      border: 1px solid var(--border-color);
+      color: var(--accent);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    h2 {
+      font-size: 15px;
+      font-weight: 600;
+      margin: 0;
+      letter-spacing: -0.01em;
+      color: var(--text-main);
+    }
+
+    /* Form rows & controls */
+    .row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .field-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex: 1;
+      min-width: 220px;
+    }
+
+    label {
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text-sub);
+      white-space: nowrap;
+      margin: 0;
+    }
+
+    select {
+      font-family: inherit;
+      font-size: 13px;
+      color: var(--text-main);
+      background-color: var(--bg-input);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 8px 30px 8px 12px;
+      flex: 1;
+      min-width: 140px;
+      max-width: 100%;
+      outline: none;
+      cursor: pointer;
+      appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 10px center;
+      transition: border-color 0.15s ease, box-shadow 0.15s ease;
+    }
+
+    select:hover {
+      border-color: var(--border-hover);
+    }
+    select:focus-visible {
+      border-color: var(--border-focus);
+      box-shadow: 0 0 0 3px var(--accent-glow);
+    }
+
+    #fileSelect {
+      width: 100%;
+      margin: 0;
+    }
+
+    /* Buttons */
+    button {
+      font-family: inherit;
+      font-size: 13px;
+      font-weight: 500;
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 8px 14px;
+      background: var(--bg-card-subtle);
+      color: var(--text-main);
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      transition: all 0.15s ease;
+      user-select: none;
+      white-space: nowrap;
+    }
+
+    button:hover:not(:disabled) {
+      border-color: var(--border-hover);
+      background: var(--bg-input);
+      transform: translateY(-1px);
+    }
+    button:active:not(:disabled) {
+      transform: translateY(0);
+    }
+    button:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+      transform: none;
+      box-shadow: none;
+    }
+    button:focus-visible {
+      outline: none;
+      border-color: var(--border-focus);
+      box-shadow: 0 0 0 3px var(--accent-glow);
+    }
+
+    button.primary {
+      background: linear-gradient(135deg, var(--accent) 0%, #7c3aed 100%);
+      color: #ffffff;
+      border-color: transparent;
+      box-shadow: 0 2px 6px var(--accent-glow);
+    }
+    button.primary:hover:not(:disabled) {
+      background: linear-gradient(135deg, var(--accent-hover) 0%, #6d28d9 100%);
+      border-color: transparent;
+      box-shadow: 0 4px 12px var(--accent-glow);
+    }
+
+    button.danger {
+      color: var(--danger-text);
+      background: var(--danger-bg);
+      border-color: var(--danger-border);
+    }
+    button.danger:hover:not(:disabled) {
+      background: var(--danger-hover);
+      border-color: var(--danger);
+    }
+
+    button.btn-run {
+      background: linear-gradient(135deg, #059669 0%, #10b981 100%);
+      color: #ffffff;
+      border-color: transparent;
+      box-shadow: 0 2px 6px rgba(16, 185, 129, 0.3);
+    }
+    button.btn-run:hover:not(:disabled) {
+      background: linear-gradient(135deg, #047857 0%, #059669 100%);
+      box-shadow: 0 4px 12px rgba(16, 185, 129, 0.4);
+    }
+
+    .btn-icon-copy {
+      padding: 4px 8px;
+      font-size: 11px;
+      border-radius: 6px;
+      color: var(--text-muted);
+      background: transparent;
+      border: 1px solid transparent;
+    }
+    .btn-icon-copy:hover {
+      color: var(--text-main);
+      background: var(--bg-card-subtle);
+      border-color: var(--border-color);
+    }
+
+    /* Status text & notes */
+    .muted {
+      color: var(--text-muted);
+      font-size: 12px;
+      margin: 0;
+      line-height: 1.5;
+    }
+
+    #changeStatus, #taskStatus {
+      font-size: 13px;
+      font-weight: 500;
+      padding: 7px 12px;
+      border-radius: 8px;
+      background: var(--bg-card-subtle);
+      border: 1px solid var(--border-color);
+      color: var(--text-sub);
+      margin: 0;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    #changeStatus.status-applied {
+      background: var(--success-bg);
+      border-color: var(--success-border);
+      color: var(--success-text);
+    }
+
+    #changeStatus.status-prepared {
+      background: rgba(99, 102, 241, 0.1);
+      border-color: rgba(99, 102, 241, 0.25);
+      color: var(--accent);
+    }
+
+    #taskStatus.status-running {
+      background: var(--warning-bg);
+      border-color: var(--warning-border);
+      color: var(--warning-text);
+    }
+
+    #taskStatus.status-succeeded {
+      background: var(--success-bg);
+      border-color: var(--success-border);
+      color: var(--success-text);
+    }
+
+    /* Terminal / Pre container */
+    .code-container {
+      background: var(--code-bg);
+      border: 1px solid var(--code-border);
+      border-radius: 10px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      box-shadow: inset 0 1px 3px rgba(0,0,0,0.4);
+    }
+
+    .code-topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 14px;
+      background: rgba(255, 255, 255, 0.03);
+      border-bottom: 1px solid var(--code-border);
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .window-dots {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+    }
+    .dot-red { background: #ff5f56; }
+    .dot-yellow { background: #ffbd2e; }
+    .dot-green { background: #27c93f; }
+
+    .code-title {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    pre {
+      margin: 0;
+      padding: 12px 14px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      line-height: 1.55;
+      color: var(--code-text);
+      max-height: 340px;
+      overflow-y: auto;
+      overflow-x: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      overflow-wrap: anywhere;
+      scrollbar-width: thin;
+      scrollbar-color: var(--border-hover) transparent;
+    }
+
+    pre::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    pre::-webkit-scrollbar-thumb {
+      background: var(--border-hover);
+      border-radius: 3px;
+    }
+
+    /* Diff line styling */
+    .diff-line {
+      display: block;
+      padding: 1px 6px;
+      border-radius: 3px;
+      white-space: pre-wrap;
+      word-break: break-all;
+      min-height: 1.5em;
+    }
+    .diff-line.diff-add {
+      background-color: var(--diff-add-bg);
+      color: var(--diff-add-text);
+    }
+    .diff-line.diff-del {
+      background-color: var(--diff-del-bg);
+      color: var(--diff-del-text);
+    }
+    .diff-line.diff-hunk {
+      background-color: var(--diff-hunk-bg);
+      color: var(--diff-hunk-text);
+      font-weight: 600;
+    }
+    .diff-line.diff-header {
+      color: var(--diff-header-text);
+      font-weight: 600;
+    }
+
+    /* Project path display */
+    .project-path-box {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      background: var(--bg-card-subtle);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 10px 14px;
+    }
+
+    #projectPath {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--text-main);
+      overflow-wrap: anywhere;
+      margin: 0;
+    }
+
+    #projectDetails {
+      font-size: 12px;
+      color: var(--text-sub);
+      margin: 0;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .tip-box {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 10px 14px;
+      background: rgba(99, 102, 241, 0.05);
+      border: 1px solid rgba(99, 102, 241, 0.2);
+      border-radius: 8px;
+      color: var(--text-sub);
+      font-size: 12px;
+    }
+    .tip-box svg {
+      color: var(--accent);
+      flex-shrink: 0;
+      margin-top: 2px;
+    }
+
+    .mode-switch { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid var(--border-color); border-radius: 8px; overflow: hidden; }
+    .mode-option { width: 100%; border: 0; border-radius: 0; background: var(--bg-input); }
+    .mode-option + .mode-option { border-left: 1px solid var(--border-color); }
+    .mode-option[aria-pressed="true"] { background: var(--accent-glow); box-shadow: inset 0 2px var(--accent); opacity: 1; }
+    .mode-option.turbo[aria-pressed="true"] { background: var(--danger-bg); color: var(--danger-text); box-shadow: inset 0 2px var(--danger); }
+    #workspaceInput { width: 100%; box-sizing: border-box; padding: 10px 12px; border: 1px solid var(--border-color); border-radius: 8px; background: var(--bg-input); color: var(--text-main); font: inherit; }
+    #workspaceInput:focus-visible { outline: 2px solid var(--border-focus); outline-offset: 2px; }
+    .hidden { display: none !important; }
+
+    /* Responsive */
+    @media (max-width: 540px) {
+      body { padding: 14px 12px; }
+      section { padding: 14px; }
+      .row button { flex: 1; }
+      .field-group { width: 100%; min-width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="brand">
+        <div class="brand-logo" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 19V5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v14"></path>
+            <path d="M2 19h20"></path>
+            <path d="M9 19v-6a3 3 0 0 1 6 0v6"></path>
+          </svg>
+        </div>
+        <div class="brand-info">
+          <h1>Local MCP Bridge</h1>
+          <p class="subhead">Quản lý thay đổi và kiểm thử kết nối trực tiếp</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <button type="button" id="themeToggle" class="btn-theme" title="Chuyển chế độ Sáng / Tối" aria-label="Chuyển chế độ Sáng / Tối">
+          <svg class="sun-icon" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
+          <svg class="moon-icon" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+        </button>
+        <span id="connection" role="status"><span class="status-dot"></span>Đang kết nối…</span>
+      </div>
+    </header>
+
+    <div id="demoBanner" class="demo-banner hidden">
+      <span class="demo-badge">PREVIEW</span>
+      <span>Đang chạy ở <strong>chế độ xem trước (Standalone Demo)</strong> với dữ liệu mẫu trực quan. Mọi nút bấm và tương tác đều hoạt động!</span>
+    </div>
+
+    <p id="error" role="alert" class="hidden"></p>
+
+    <!-- Phần 1: Đợt sửa -->
+    <section aria-labelledby="changesTitle">
+      <div class="section-header">
+        <div class="section-title-wrap">
+          <div class="section-icon" aria-hidden="true">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+          </div>
+          <h2 id="changesTitle">Đợt sửa</h2>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="field-group">
+          <label for="changeSelect">Chọn đợt</label>
+          <select id="changeSelect">
+            <option value="">Chưa có đợt sửa</option>
+          </select>
+        </div>
+        <button id="refresh" type="button">
+          <svg aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+          Làm mới
+        </button>
+      </div>
+
+      <p id="changeStatus" class="muted">Chuẩn bị thay đổi trong hội thoại để xem diff ở đây.</p>
+
+      <div class="field-group" style="width: 100%;">
+        <label for="fileSelect">File trong đợt sửa</label>
+        <select id="fileSelect">
+          <option value="">Tất cả file</option>
+        </select>
+      </div>
+
+      <div class="code-container">
+        <div class="code-topbar">
+          <div class="window-dots" aria-hidden="true">
+            <span class="dot dot-red"></span>
+            <span class="dot dot-yellow"></span>
+            <span class="dot dot-green"></span>
+          </div>
+          <div class="code-title">
+            <svg aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="18" r="3"></circle><circle cx="6" cy="6" r="3"></circle><path d="M6 9v12"></path><path d="M18 9a9 9 0 0 0-9 9"></path></svg>
+            <span>diff viewer</span>
+          </div>
+          <button type="button" id="copyDiffBtn" class="btn-icon-copy" title="Sao chép diff">Sao chép</button>
+        </div>
+        <pre id="diff" aria-label="Nội dung diff">Chưa chọn đợt sửa.</pre>
+      </div>
+
+      <button id="moreDiff" class="hidden" type="button">Đọc tiếp diff</button>
+
+      <div class="row">
+        <button id="apply" class="primary" disabled type="button">
+          <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
+          Áp dụng đợt sửa
+        </button>
+        <button id="undo" disabled type="button">
+          <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7v6h6"></path><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"></path></svg>
+          Hoàn tác đợt sửa
+        </button>
+      </div>
+    </section>
+
+    <!-- Phần 2: Test / Build -->
+    <section aria-labelledby="taskTitle">
+      <div class="section-header">
+        <div class="section-title-wrap">
+          <div class="section-icon" aria-hidden="true">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+          </div>
+          <h2 id="taskTitle">Test/build</h2>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="field-group">
+          <label for="taskSelect">Task</label>
+          <select id="taskSelect"></select>
+        </div>
+        <button id="start" class="btn-run" disabled type="button">
+          <svg aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+          Chạy
+        </button>
+        <button id="stop" class="danger" disabled type="button">
+          <svg aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1"></rect></svg>
+          Dừng
+        </button>
+      </div>
+
+      <p id="taskStatus" role="status">Chưa có task chạy.</p>
+      <p id="taskNote" class="muted"></p>
+
+      <div class="code-container">
+        <div class="code-topbar">
+          <div class="window-dots" aria-hidden="true">
+            <span class="dot dot-red"></span>
+            <span class="dot dot-yellow"></span>
+            <span class="dot dot-green"></span>
+          </div>
+          <div class="code-title">
+            <svg aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>
+            <span>task.log</span>
+          </div>
+          <button type="button" id="copyLogsBtn" class="btn-icon-copy" title="Sao chép log">Sao chép</button>
+        </div>
+        <pre id="logs" aria-label="Log task" aria-live="off">Log sẽ xuất hiện ở đây.</pre>
+      </div>
+    </section>
+
+    <section aria-labelledby="modeTitle">
+      <div class="section-header"><h2 id="modeTitle">Chế độ kết nối</h2><span id="modeBadge">Normal</span></div>
+      <div class="mode-switch" role="group" aria-label="Chọn chế độ runtime">
+        <button id="modeNormal" class="mode-option" aria-pressed="true">Normal</button>
+        <button id="modeTurbo" class="mode-option turbo" aria-pressed="false">Turbo</button>
+      </div>
+      <p id="modeDescription" class="muted" role="status">Đang đọc chế độ…</p>
+    </section>
+
+    <!-- Phần 3: Project và kết nối -->
+    <section aria-labelledby="projectTitle">
+      <div class="section-header">
+        <div class="section-title-wrap">
+          <div class="section-icon" aria-hidden="true">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+          </div>
+          <h2 id="projectTitle">Project và kết nối</h2>
+        </div>
+      </div>
+
+      <div class="project-path-box">
+        <span id="projectPath">Đang tải project…</span>
+        <button type="button" id="copyPathBtn" class="btn-icon-copy" title="Sao chép đường dẫn">Sao chép</button>
+      </div>
+
+      <p id="projectDetails" class="muted"></p>
+      <label for="workspaceSelect">Thư mục đã dùng</label>
+      <select id="workspaceSelect" aria-label="Thư mục đã dùng"></select>
+      <label for="workspaceInput">Đường dẫn thư mục local</label>
+      <div class="row">
+        <div class="field-group"><input id="workspaceInput" type="text" placeholder="D:/AI/du-an-cua-khay" autocomplete="off" spellcheck="false"></div>
+        <button id="openWorkspace" type="button">Mở thư mục</button>
+      </div>
+      <p class="muted">Chọn thư mục đã dùng hoặc dán đường dẫn mới. Lịch sử sửa được lưu riêng cho từng thư mục.</p>
+
+      <div class="tip-box">
+        <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+        <p class="muted">Mở cùng thư mục này trong Codex desktop để xem file. Diff và hoàn tác từng đợt dùng được cả khi thư mục chưa có Git.</p>
+      </div>
+    </section>
+  </div>
+
+  <script>
+  (() => {
+    "use strict";
+    const $ = id => document.getElementById(id), pending = new Map();
+    const statuses = {
+      prepared: "Đang chờ áp dụng",
+      applied: "Đã áp dụng",
+      undone: "Đã hoàn tác",
+      applying: "Đang ghi",
+      undoing: "Đang hoàn tác",
+      recovered: "Đã phục hồi sau lỗi",
+      recovery_conflict: "Cần xử lý xung đột",
+      undo_failed: "Hoàn tác lỗi, đã phục hồi",
+      expired: "Đã hết thời hạn lưu bản sao",
+      running: "Đang chạy",
+      succeeded: "Thành công",
+      failed: "Thất bại",
+      stopped: "Đã dừng",
+      timed_out: "Hết thời gian",
+      runtime_lost: "Mất kết nối bộ chạy"
+    };
+
+    const isStandalone = (window.self === window.top);
+    let connected = false, disposed = false, visible = true, hostOrigin = null, project = null, change = null, runId = null, cursor = 0, timer = null, polling = false, busy = false, nextDiff = null, pendingStart = null;
+
+    // Theme Management
+    const initTheme = () => {
+      const saved = localStorage.getItem("local-bridge-theme");
+      const theme = saved || "dark";
+      document.documentElement.setAttribute("data-theme", theme);
+    };
+    initTheme();
+
+    $("themeToggle").onclick = () => {
+      const current = document.documentElement.getAttribute("data-theme") || "dark";
+      const next = current === "dark" ? "light" : "dark";
+      document.documentElement.setAttribute("data-theme", next);
+      localStorage.setItem("local-bridge-theme", next);
+    };
+
+    // Helper functions for clipboard copy
+    function setupCopyBtn(btnId, getText) {
+      const btn = $(btnId);
+      if (!btn) return;
+      btn.onclick = async () => {
+        try {
+          const text = getText();
+          if (!text) return;
+          await navigator.clipboard.writeText(text);
+          const original = btn.textContent;
+          btn.textContent = "✓ Đã chép";
+          setTimeout(() => { btn.textContent = original; }, 1500);
+        } catch (_) {}
+      };
+    }
+    setupCopyBtn("copyPathBtn", () => $("projectPath").textContent);
+    setupCopyBtn("copyLogsBtn", () => $("logs").textContent);
+    setupCopyBtn("copyDiffBtn", () => {
+      const lines = Array.from($("diff").querySelectorAll(".diff-line"));
+      return lines.length ? lines.map(l => l.textContent).join("\n") : $("diff").textContent;
     });
-  }
-  function unpack(result){
-    if(result?.isError)throw new Error(result.content?.filter(x=>x.type==="text").map(x=>x.text).join("\n")||"Tool báo lỗi.");
-    return result?.structuredContent || JSON.parse(result?.content?.find(x=>x.type==="text")?.text || "{}");
-  }
-  async function call(name,args={}){return unpack(await rpc("tools/call",{name,arguments:args}));}
-  function error(e){$("error").textContent=e.message || String(e);$("connection").textContent="Cần kiểm tra kết nối";}
-  function options(select,items,key,label,empty){
-    const value=select.value; select.replaceChildren();
-    if(empty){const o=document.createElement("option");o.value="";o.textContent=empty;select.append(o);}
-    for(const item of items){const o=document.createElement("option");o.value=item[key];o.textContent=label(item);select.append(o);}
-    if([...select.options].some(o=>o.value===value))select.value=value;
-  }
-  function buttons(){
-    const active=!!project?.active_run_id;
-    $("apply").disabled=busy||active||change?.status!=="prepared";
-    $("undo").disabled=busy||active||change?.status!=="applied";
-    $("start").disabled=busy||active||!project?.runtime?.commands_enabled||!$("taskSelect").value;
-    $("stop").disabled=busy||!active;
-  }
-  function renderProject(p){
-    project=p;$("projectPath").textContent=p.workspace_root;
-    $("connection").textContent=p.runtime.status==="connected"?"Đã kết nối":"Bộ chạy chưa kết nối";
-    $("projectDetails").textContent=`${p.runtime.version || "Chưa có phiên bản Codex"} · ${p.git_repository?"Có Git":"Thư mục chưa có Git"}`;
-    $("taskNote").textContent=p.runtime.commands_enabled?"Tối đa một task; file được khóa ghi trong lúc chạy.":"Bộ chạy chưa đạt kiểm tra bảo vệ dữ liệu và mạng. Chức năng chạy task đang tạm khóa; xem chi tiết bằng doctor.";
-    if(p.active_run_id && p.active_run_id!==runId){runId=p.active_run_id;cursor=0;$("logs").textContent="";}
-    buttons();schedule();
-  }
-  async function refresh(){
-    const [p,c,t]=await Promise.all([call("project_info"),call("list_changes"),call("list_tasks")]);
-    renderProject(p);options($("changeSelect"),c.changes,"id",x=>`${x.title} · ${statuses[x.status]||x.status}`,"Chọn đợt sửa");
-    options($("taskSelect"),t.tasks,"task_id",x=>x.task_id);
-    if($("changeSelect").value)await loadChange();
-    if(runId)await pollRun();buttons();
-  }
-  async function loadChange(append=false){
-    const id=$("changeSelect").value;if(!id){change=null;buttons();return;}
-    const selected=$("fileSelect").value;
-    const result=await call("get_change",{change_id:id,path:selected||null,offset:append?(nextDiff||0):0});
-    change=result;nextDiff=result.next_offset;
-    $("changeStatus").textContent=`${statuses[result.status]||result.status} · ${result.change_id}${result.error?" · "+result.error:""}`;
-    options($("fileSelect"),result.files,"path",x=>x.path,"Tất cả file");
-    $("diff").textContent=(append?$("diff").textContent:"")+result.diff;
-    $("moreDiff").classList.toggle("hidden",nextDiff==null);buttons();
-  }
-  async function mutation(name){
-    if(!change)return;
-    await call(name,{change_id:change.change_id,request_id:`ui-${name}-${change.change_id}`});await refresh();
-  }
-  async function start(){
-    const task=$("taskSelect").value;
-    if(!pendingStart)pendingStart={task_id:task,request_id:crypto.randomUUID(),timeout_seconds:120};
-    const run=await call("start_task",pendingStart);pendingStart=null;
-    runId=run.run_id;cursor=0;$("logs").textContent="";await refresh();
-  }
-  async function pollRun(){
-    if(!runId)return;
-    const r=await call("get_task_run",{run_id:runId,cursor});
-    const text=r.events.map(e=>e.text).join("");cursor=r.next_cursor;
-    $("logs").textContent=($("logs").textContent+text).slice(-262144);
-    $("taskStatus").textContent=`${statuses[r.status]||r.status}${r.stopping?" · đang dừng…":""} · ${r.elapsed_seconds}s${r.exit_code!=null?" · mã kết thúc "+r.exit_code:""}`;
-    if(r.error)$("taskNote").textContent=r.error;
-    if(r.status!=="running" && project){project.active_run_id=null;buttons();}
-  }
-  function schedule(){
-    clearTimeout(timer);
-    if(!disposed&&connected&&visible&&!document.hidden&&project?.active_run_id)timer=setTimeout(async()=>{
-      if(polling)return;polling=true;
-      try{await pollRun();renderProject(await call("project_info"));}catch(e){error(e);}finally{polling=false;schedule();}
-    },2000);
-  }
-  async function action(fn){busy=true;buttons();$("error").textContent="";try{await fn();}catch(e){error(e);}finally{busy=false;buttons();schedule();}}
-  $("refresh").onclick=()=>action(refresh);
-  $("changeSelect").onchange=()=>action(async()=>{$("fileSelect").value="";await loadChange();});
-  $("fileSelect").onchange=()=>action(()=>loadChange());
-  $("moreDiff").onclick=()=>action(()=>loadChange(true));
-  $("apply").onclick=()=>action(()=>mutation("apply_changes"));
-  $("undo").onclick=()=>action(()=>mutation("undo_changes"));
-  $("start").onclick=()=>action(start);
-  $("stop").onclick=()=>action(async()=>{await call("stop_task_run",{run_id:runId,request_id:`ui-stop-${runId}`});await pollRun();});
-  window.addEventListener("message",event=>{
-    if(event.source!==parent||!event.data||event.data.jsonrpc!=="2.0"||(hostOrigin&&event.origin!==hostOrigin))return;
-    const m=event.data;
-    if(pending.has(m.id)){
-      const p=pending.get(m.id);pending.delete(m.id);clearTimeout(p.timeout);
-      if(!hostOrigin&&event.origin!=="null")hostOrigin=event.origin;
-      m.error?p.reject(new Error(m.error.message)):p.resolve(m.result);return;
+
+    function updateConnectionStatus(text, state) {
+      const el = $("connection");
+      el.setAttribute("data-state", state || "neutral");
+      el.replaceChildren();
+      const dot = document.createElement("span");
+      dot.className = "status-dot";
+      dot.setAttribute("aria-hidden", "true");
+      el.appendChild(dot);
+      el.appendChild(document.createTextNode(text));
     }
-    if(m.method==="ui/notifications/tool-result"){
-      try{const data=unpack(m.params);if(data.project)renderProject(data.project);}catch(e){error(e);}
-    }else if(m.method==="ui/notifications/tool-cancelled"){error(new Error(m.params.reason||"Thao tác bị hủy."));
-    }else if(m.method==="ui/resource-teardown"){
-      disposed=true;clearTimeout(timer);parent.postMessage({jsonrpc:"2.0",id:m.id,result:{}},hostOrigin||"*");
-    }else if(m.method==="ui/notifications/host-context-changed"){
-      if(m.params.theme)document.documentElement.style.colorScheme=m.params.theme;
+
+    // Safe Diff Renderer (Guarantees zero HTML tag injection / XSS safety)
+    function renderDiff(text, append = false) {
+      const el = $("diff");
+      if (!append) el.replaceChildren();
+      if (!text) {
+        if (!append) el.textContent = "Chưa chọn đợt sửa.";
+        return;
+      }
+      const lines = text.split("\n");
+      const fragment = document.createDocumentFragment();
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (i === lines.length - 1 && line === "") break;
+        const div = document.createElement("div");
+        div.className = "diff-line";
+        if (line.startsWith("+++") || line.startsWith("---") || line.startsWith("diff ") || line.startsWith("index ")) {
+          div.classList.add("diff-header");
+        } else if (line.startsWith("+")) {
+          div.classList.add("diff-add");
+        } else if (line.startsWith("-")) {
+          div.classList.add("diff-del");
+        } else if (line.startsWith("@@")) {
+          div.classList.add("diff-hunk");
+        }
+        div.textContent = line;
+        fragment.appendChild(div);
+      }
+      el.appendChild(fragment);
     }
-  });
-  document.addEventListener("visibilitychange",schedule);
-  new IntersectionObserver(entries=>{visible=entries[0].isIntersecting;schedule();}).observe(document.body);
-  new ResizeObserver(()=>{if(connected)notify("ui/notifications/size-changed",{height:document.documentElement.scrollHeight});}).observe(document.body);
-  rpc("ui/initialize",{protocolVersion:"2026-01-26",appInfo:{name:"local-bridge-panel",version:"1.0.0"},appCapabilities:{availableDisplayModes:["inline","fullscreen"]}})
-    .then(result=>{connected=true;notify("ui/notifications/initialized",{});if(result.hostContext?.theme)document.documentElement.style.colorScheme=result.hostContext.theme;return action(refresh);}).catch(error);
-})();
-</script>
+
+    // Standalone Mock Implementation for previewing directly in browser
+    const demoProject = {
+      context_id: "demo-context",
+      recent_workspaces: [],
+      workspace_root: "d:/AI/tunnel-client-v0.0.14-windows-arm64/local-bridge",
+      git_repository: true,
+      active_run_id: null,
+      runtime: {
+        status: "connected",
+        version: "codex-cli 0.154.0-alpha.6.2",
+        commands_enabled: true,
+        mode: "normal"
+      }
+    };
+    const demoChanges = [
+      {
+        id: "change-refactor-01",
+        title: "feat(ui): Thiết kế lại giao diện Panel hiện đại, có gu và dark mode",
+        status: "prepared"
+      },
+      {
+        id: "change-runtime-02",
+        title: "fix(runtime): Tối ưu hóa thu hồi tiến trình con khi task dừng",
+        status: "applied"
+      }
+    ];
+    const demoChangeDetails = {
+      "change-refactor-01": {
+        change_id: "change-refactor-01",
+        status: "prepared",
+        files: [
+          { path: "local-bridge/panel.html" },
+          { path: "local-bridge/server.py" }
+        ],
+        diff: `--- a/local-bridge/panel.html\n+++ b/local-bridge/panel.html\n@@ -6,15 +6,25 @@\n-:root{color-scheme:light dark;font:14px/1.5 system-ui,sans-serif;--line:#8885;--muted:#71717a;--accent:#087f74}\n+:root {\n+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;\n+  --font-mono: "JetBrains Mono", Consolas, monospace;\n+  --bg-card: #101726;\n+  --accent: #6366f1;\n+  /* Hệ thống giao diện hiện đại, tinh tế và tối ưu cho nhà phát triển */\n+}\n+<header>\n-  <h1>Local MCP Bridge</h1>\n+  <div class="brand"><h1>Local MCP Bridge</h1><p>Bảng điều khiển kết nối cục bộ</p></div>\n--- a/local-bridge/server.py\n+++ b/local-bridge/server.py\n@@ -23,3 +23,3 @@\n UI_URI = "ui://local-bridge/control-panel-v1.html"\n+# Đảm bảo CSP connectDomains và resourceDomains an toàn tuyệt đối`
+      },
+      "change-runtime-02": {
+        change_id: "change-runtime-02",
+        status: "applied",
+        files: [
+          { path: "local-bridge/windows_job.py" }
+        ],
+        diff: `--- a/local-bridge/windows_job.py\n+++ b/local-bridge/windows_job.py\n@@ -12,4 +12,8 @@\n class WindowsJobObject:\n+    # Đảm bảo đóng toàn bộ cây tiến trình con\n     def terminate(self):\n+        CloseHandle(self.job)\n+        return True`
+      }
+    };
+    const demoTasks = [
+      { task_id: "test_bridge" },
+      { task_id: "git_status" },
+      { task_id: "verify_runtime" }
+    ];
+    let demoRun = null, demoInterval = null;
+
+    async function handleStandaloneRpc(method, params) {
+      await new Promise(r => setTimeout(r, 60));
+      if (method === "ui/initialize") {
+        return { protocolVersion: "2026-01-26", hostInfo: { name: "standalone-preview", version: "1.0.0" } };
+      }
+      if (method === "tools/call") {
+        const { name, arguments: args } = params;
+        let data = {};
+        if (name === "project_info") data = demoProject;
+        else if (name === "set_runtime_mode" || name === "select_workspace") {
+          demoProject.context_id = crypto.randomUUID();
+          if (args.mode) demoProject.runtime.mode = args.mode;
+          if (args.workspace_root) demoProject.workspace_root = args.workspace_root;
+          demoProject.recent_workspaces = [...new Set([demoProject.workspace_root, ...demoProject.recent_workspaces])];
+          data = demoProject;
+        }
+        else if (name === "list_changes") data = { changes: demoChanges };
+        else if (name === "list_tasks") data = { tasks: demoTasks };
+        else if (name === "get_change") {
+          const detail = demoChangeDetails[args.change_id];
+          if (!detail) data = { change_id: args.change_id, status: "prepared", files: [], diff: "" };
+          else if (args.path) {
+            const diffParts = detail.diff.split(/(?=--- a\/)/);
+            const matchingPart = diffParts.find(p => p.includes(`--- a/${args.path}`)) || detail.diff;
+            data = { ...detail, diff: matchingPart };
+          } else {
+            data = detail;
+          }
+        }
+        else if (name === "apply_changes") {
+          const c = demoChanges.find(x => x.id === args.change_id);
+          if (c) c.status = "applied";
+          if (demoChangeDetails[args.change_id]) demoChangeDetails[args.change_id].status = "applied";
+          data = { status: "applied", change_id: args.change_id };
+        }
+        else if (name === "undo_changes") {
+          const c = demoChanges.find(x => x.id === args.change_id);
+          if (c) c.status = "undone";
+          if (demoChangeDetails[args.change_id]) demoChangeDetails[args.change_id].status = "undone";
+          data = { status: "undone", change_id: args.change_id };
+        }
+        else if (name === "start_task") {
+          demoRun = {
+            run_id: "run-" + Date.now(),
+            task_id: args.task_id,
+            status: "running",
+            elapsed_seconds: 1,
+            cursor: 0,
+            events: [
+              { text: `[00:01] 🚀 Bắt đầu thực thi task: ${args.task_id}\n` },
+              { text: `[00:02] 🔍 Đang kiểm tra cấu trúc thư mục và quyền thực thi...\n` }
+            ]
+          };
+          demoProject.active_run_id = demoRun.run_id;
+          clearInterval(demoInterval);
+          demoInterval = setInterval(() => {
+            if (!demoRun || demoRun.status !== "running") return;
+            demoRun.elapsed_seconds += 1;
+            if (demoRun.elapsed_seconds === 3) {
+              demoRun.events.push({ text: `[00:03] ⚡ Chạy bộ kiểm thử tự động (22/22 passed)...\n` });
+            } else if (demoRun.elapsed_seconds >= 5) {
+              demoRun.events.push({ text: `[00:05] ✨ Task hoàn thành xuất sắc với mã kết thúc 0.\n` });
+              demoRun.status = "succeeded";
+              demoRun.exit_code = 0;
+              demoProject.active_run_id = null;
+              clearInterval(demoInterval);
+              pollRun();
+            }
+            pollRun();
+          }, 1000);
+          data = { run_id: demoRun.run_id };
+        }
+        else if (name === "get_task_run") {
+          if (!demoRun) data = { status: "stopped", events: [], cursor: 0, elapsed_seconds: 0 };
+          else {
+            const unread = demoRun.events.slice(args.cursor || 0);
+            data = {
+              status: demoRun.status,
+              events: unread,
+              next_cursor: demoRun.events.length,
+              elapsed_seconds: demoRun.elapsed_seconds,
+              exit_code: demoRun.exit_code != null ? demoRun.exit_code : null
+            };
+          }
+        }
+        else if (name === "stop_task_run") {
+          clearInterval(demoInterval);
+          if (demoRun) {
+            demoRun.status = "stopped";
+            demoRun.events.push({ text: `[Task đã dừng bởi người dùng]\n` });
+          }
+          demoProject.active_run_id = null;
+          data = { stopped: true };
+        }
+        return { structuredContent: data };
+      }
+      return {};
+    }
+
+    const notify = (method, params) => {
+      if (!isStandalone) parent.postMessage({ jsonrpc: "2.0", method, params }, hostOrigin || "*");
+    };
+
+    function rpc(method, params) {
+      if (isStandalone) {
+        return handleStandaloneRpc(method, params);
+      }
+      return new Promise((resolve, reject) => {
+        const id = crypto.randomUUID();
+        const timeout = setTimeout(() => {
+          pending.delete(id);
+          reject(new Error("Kết nối hết thời gian. Thao tác chưa được tự chạy lại; bấm Làm mới để kiểm tra."));
+        }, 60000);
+        pending.set(id, { resolve, reject, timeout });
+        parent.postMessage({ jsonrpc: "2.0", id, method, params }, hostOrigin || "*");
+      });
+    }
+
+    function unpack(result) {
+      if (result?.isError) throw new Error(result.content?.filter(x => x.type === "text").map(x => x.text).join("\n") || "Tool báo lỗi.");
+      return result?.structuredContent || JSON.parse(result?.content?.find(x => x.type === "text")?.text || "{}");
+    }
+
+    async function call(name, args = {}) {
+      const scoped = ["apply_changes", "undo_changes", "start_task", "set_runtime_mode", "select_workspace"].includes(name);
+      const result = unpack(await rpc("tools/call", { name, arguments: scoped ? { ...args, context_id: project?.context_id } : args }));
+      if (result.context_id && project && !["project_info", "set_runtime_mode", "select_workspace"].includes(name) && result.context_id !== project.context_id) {
+        throw new Error("Thư mục hoặc chế độ đã thay đổi. Bấm Làm mới trước khi tiếp tục.");
+      }
+      return result;
+    }
+
+    function error(e) {
+      const errEl = $("error");
+      errEl.textContent = e.message || String(e);
+      errEl.classList.remove("hidden");
+      updateConnectionStatus("Cần kiểm tra kết nối", "error");
+    }
+
+    function options(select, items, key, label, empty) {
+      const value = select.value;
+      select.replaceChildren();
+      if (empty) {
+        const o = document.createElement("option");
+        o.value = "";
+        o.textContent = empty;
+        select.append(o);
+      }
+      for (const item of items) {
+        const o = document.createElement("option");
+        o.value = item[key];
+        o.textContent = label(item);
+        select.append(o);
+      }
+      if ([...select.options].some(o => o.value === value)) select.value = value;
+    }
+
+    function buttons() {
+      const active = !!project?.active_run_id;
+      $("apply").disabled = busy || active || change?.status !== "prepared";
+      $("undo").disabled = busy || active || change?.status !== "applied";
+      $("start").disabled = busy || active || !project?.runtime?.commands_enabled || !$("taskSelect").value;
+      $("stop").disabled = busy || !active;
+      $("refresh").disabled = busy;
+      $("modeNormal").disabled = busy || active || !project || project.runtime.mode === "normal";
+      $("modeTurbo").disabled = busy || active || !project || project.runtime.mode === "turbo";
+      $("workspaceSelect").disabled = busy || active || !project;
+      $("workspaceInput").disabled = busy || active || !project;
+      $("openWorkspace").disabled = busy || active || !project;
+    }
+
+    function renderProject(p) {
+      if (project?.context_id && project.context_id !== p.context_id) {
+        change = null; runId = null; cursor = 0; pendingStart = null; nextDiff = null;
+        $("changeSelect").replaceChildren(); $("fileSelect").replaceChildren(); $("taskSelect").replaceChildren();
+        $("logs").textContent = "";
+        $("taskStatus").textContent = "Chưa có task chạy.";
+        $("changeStatus").textContent = "Chọn đợt sửa của thư mục hiện tại.";
+        renderDiff("");
+      }
+      const switched = project?.context_id !== p.context_id;
+      project = p;
+      const turbo = p.runtime.mode === "turbo";
+      $("modeBadge").textContent = turbo ? "Turbo" : "Normal";
+      $("modeNormal").setAttribute("aria-pressed", String(!turbo));
+      $("modeTurbo").setAttribute("aria-pressed", String(turbo));
+      $("modeDescription").textContent = turbo
+        ? "Turbo: đọc ngoài thư mục, dùng mạng, Bash, script, skill và MCP Codex. File/Bash/script chỉ ghi trong thư mục đang chọn; MCP dùng quyền riêng của nó."
+        : "Normal: sửa file và chạy task đã cấu hình. Mạng được bật; task chỉ ghi trong thư mục đang chọn.";
+      options($("workspaceSelect"), (p.recent_workspaces || [p.workspace_root]).map(path => ({path})), "path", x => x.path);
+      $("workspaceSelect").value = p.workspace_root;
+      if (switched) $("workspaceInput").value = p.workspace_root;
+      $("projectPath").textContent = p.workspace_root;
+      updateConnectionStatus(
+        p.runtime.status === "connected" ? "Đã kết nối" : "Bộ chạy chưa kết nối",
+        p.runtime.status === "connected" ? "connected" : "error"
+      );
+      $("projectDetails").textContent = `${p.runtime.version || "Chưa có phiên bản Codex"} · ${p.git_repository ? "Có Git" : "Thư mục chưa có Git"}`;
+      $("taskNote").textContent = p.runtime.commands_enabled
+        ? "Tối đa một task; file được khóa ghi trong lúc chạy."
+        : "Bộ chạy chưa đạt kiểm tra bảo vệ dữ liệu và mạng. Chức năng chạy task đang tạm khóa; xem chi tiết bằng doctor.";
+      if (p.active_run_id && p.active_run_id !== runId) {
+        runId = p.active_run_id;
+        cursor = 0;
+        $("logs").textContent = "";
+      }
+      buttons();
+      schedule();
+    }
+
+    async function refresh() {
+      const p = await call("project_info");
+      renderProject(p);
+      const [c, t] = await Promise.all([call("list_changes"), call("list_tasks")]);
+      options($("changeSelect"), c.changes, "id", x => `${x.title} · ${statuses[x.status] || x.status}`, "Chọn đợt sửa");
+      options($("taskSelect"), t.tasks, "task_id", x => x.task_id);
+
+      if (isStandalone) {
+        if (!$("changeSelect").value && c.changes.length > 0) $("changeSelect").value = c.changes[0].id;
+        if (!$("taskSelect").value && t.tasks.length > 0) $("taskSelect").value = t.tasks[0].task_id;
+      }
+
+      if ($("changeSelect").value) await loadChange();
+      if (runId) await pollRun();
+      buttons();
+    }
+
+    async function loadChange(append = false) {
+      const id = $("changeSelect").value;
+      if (!id) {
+        change = null;
+        renderDiff("");
+        $("changeStatus").textContent = "Chuẩn bị thay đổi trong hội thoại để xem diff ở đây.";
+        $("changeStatus").className = "muted";
+        buttons();
+        return;
+      }
+      const selected = $("fileSelect").value;
+      const result = await call("get_change", { change_id: id, path: selected || null, offset: append ? (nextDiff || 0) : 0 });
+      change = result;
+      nextDiff = result.next_offset;
+      $("changeStatus").textContent = `${statuses[result.status] || result.status} · ${result.change_id}${result.error ? " · " + result.error : ""}`;
+      $("changeStatus").className = "status-" + (result.status || "neutral");
+      options($("fileSelect"), result.files, "path", x => x.path, "Tất cả file");
+      renderDiff(result.diff, append);
+      $("moreDiff").classList.toggle("hidden", nextDiff == null);
+      buttons();
+    }
+
+    async function mutation(name) {
+      if (!change) return;
+      await call(name, { change_id: change.change_id, request_id: `ui-${name}-${change.change_id}` });
+      await refresh();
+    }
+
+    async function start() {
+      const task = $("taskSelect").value;
+      if (!pendingStart) pendingStart = { task_id: task, request_id: crypto.randomUUID(), timeout_seconds: 120 };
+      const run = await call("start_task", pendingStart);
+      pendingStart = null;
+      runId = run.run_id;
+      cursor = 0;
+      $("logs").textContent = "";
+      await refresh();
+    }
+
+    async function pollRun() {
+      if (!runId || polling) return;
+      polling = true;
+      const requestedRun = runId, requestedCursor = cursor;
+      try {
+        const r = await call("get_task_run", { run_id: requestedRun, cursor: requestedCursor });
+        if (runId !== requestedRun || cursor !== requestedCursor) return;
+        const text = r.events.map(e => e.text).join("");
+        cursor = r.next_cursor;
+        $("logs").textContent = ($("logs").textContent + text).slice(-262144);
+        $("logs").scrollTop = $("logs").scrollHeight;
+        $("taskStatus").textContent = `${statuses[r.status] || r.status}${r.stopping ? " · đang dừng…" : ""} · ${r.elapsed_seconds}s${r.exit_code != null ? " · mã kết thúc " + r.exit_code : ""}`;
+        $("taskStatus").className = "status-" + (r.status || "neutral");
+        if (r.error) $("taskNote").textContent = r.error;
+        if (r.status !== "running" && project) {
+          project.active_run_id = null;
+          buttons();
+        }
+      } finally {
+        polling = false;
+      }
+    }
+
+    function schedule() {
+      clearTimeout(timer);
+      if (!disposed && connected && visible && !document.hidden && project?.active_run_id) {
+        timer = setTimeout(async () => {
+          try {
+            await pollRun();
+            renderProject(await call("project_info"));
+          } catch (e) {
+            error(e);
+          } finally {
+            schedule();
+          }
+        }, 2000);
+      }
+    }
+
+    async function action(fn) {
+      busy = true;
+      buttons();
+      $("error").textContent = "";
+      $("error").classList.add("hidden");
+      try {
+        await fn();
+      } catch (e) {
+        error(e);
+      } finally {
+        busy = false;
+        buttons();
+        schedule();
+      }
+    }
+
+    $("refresh").onclick = () => action(refresh);
+    $("changeSelect").onchange = () => action(async () => {
+      $("fileSelect").value = "";
+      await loadChange();
+    });
+    $("fileSelect").onchange = () => action(() => loadChange());
+    $("moreDiff").onclick = () => action(() => loadChange(true));
+    $("apply").onclick = () => action(() => mutation("apply_changes"));
+    $("undo").onclick = () => action(() => mutation("undo_changes"));
+    $("start").onclick = () => action(start);
+    async function selectContext(name, args) {
+      renderProject(await call(name, args));
+      rpc("ui/update-model-context", { content: [{ type: "text", text: `Thư mục đang chọn: ${project.workspace_root}; chế độ ${project.runtime.mode}; context_id=${project.context_id}. Đọc lại file trước khi sửa.` }] }).catch(() => {});
+      await refresh();
+    }
+    $("modeNormal").onclick = () => action(() => selectContext("set_runtime_mode", { mode: "normal" }));
+    $("modeTurbo").onclick = () => action(() => selectContext("set_runtime_mode", { mode: "turbo" }));
+    $("openWorkspace").onclick = () => action(() => selectContext("select_workspace", { workspace_root: $("workspaceInput").value.trim() }));
+    $("workspaceInput").onkeydown = e => { if (e.key === "Enter" && !busy) $("openWorkspace").click(); };
+    $("workspaceSelect").onchange = () => action(() => selectContext("select_workspace", { workspace_root: $("workspaceSelect").value }));
+    $("stop").onclick = () => action(async () => {
+      await call("stop_task_run", { run_id: runId, request_id: `ui-stop-${runId}` });
+      await pollRun();
+    });
+
+    window.addEventListener("message", event => {
+      if (event.source !== parent || !event.data || event.data.jsonrpc !== "2.0" || (hostOrigin && event.origin !== hostOrigin)) return;
+      const m = event.data;
+      if (pending.has(m.id)) {
+        const p = pending.get(m.id);
+        pending.delete(m.id);
+        clearTimeout(p.timeout);
+        if (!hostOrigin && event.origin !== "null") hostOrigin = event.origin;
+        m.error ? p.reject(new Error(m.error.message)) : p.resolve(m.result);
+        return;
+      }
+      if (m.method === "ui/notifications/tool-result") {
+        try {
+          const data = unpack(m.params);
+          if (data.project) renderProject(data.project);
+        } catch (e) {
+          error(e);
+        }
+      } else if (m.method === "ui/notifications/tool-cancelled") {
+        error(new Error(m.params.reason || "Thao tác bị hủy."));
+      } else if (m.method === "ui/resource-teardown") {
+        disposed = true;
+        clearTimeout(timer);
+        parent.postMessage({ jsonrpc: "2.0", id: m.id, result: {} }, hostOrigin || "*");
+      } else if (m.method === "ui/notifications/host-context-changed") {
+        if (m.params.theme) {
+          document.documentElement.setAttribute("data-theme", m.params.theme);
+        }
+      }
+    });
+
+    document.addEventListener("visibilitychange", schedule);
+    new IntersectionObserver(entries => {
+      visible = entries[0].isIntersecting;
+      schedule();
+    }).observe(document.body);
+    new ResizeObserver(() => {
+      if (connected) notify("ui/notifications/size-changed", { height: document.documentElement.scrollHeight });
+    }).observe(document.body);
+
+    if (isStandalone) {
+      $("demoBanner").classList.remove("hidden");
+    }
+
+    rpc("ui/initialize", {
+      protocolVersion: "2026-01-26",
+      appInfo: { name: "local-bridge-panel", version: "1.0.0" },
+      appCapabilities: { availableDisplayModes: ["inline", "fullscreen"] }
+    }).then(result => {
+      connected = true;
+      notify("ui/notifications/initialized", {});
+      if (result.hostContext?.theme) {
+        document.documentElement.setAttribute("data-theme", result.hostContext.theme);
+      }
+      return action(refresh);
+    }).catch(error);
+  })();
+  </script>
+</body>
 </html>

@@ -26,7 +26,8 @@ ALLOWED_METHODS = frozenset({
 })
 ENV_NAMES = {"SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "PATH", "TEMP", "TMP",
              "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "LOCALAPPDATA", "APPDATA",
-             "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMDATA", "SYSTEMDRIVE"}
+             "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMDATA", "SYSTEMDRIVE",
+             "USERNAME", "USERDOMAIN"}  # Codex provisioning uses these to grant the real user access.
 
 
 def clean_environment(cache: Path) -> dict[str, str]:
@@ -55,7 +56,7 @@ def find_codex(configured: str | None = None) -> Path:
     raise BridgeError("RUNTIME_UNAVAILABLE: no installed codex.exe; configure codex_executable locally.")
 
 
-def process_overrides(root: Path, cache: Path, runtime_roots: list[Path]) -> list[str]:
+def process_overrides(root: Path, cache: Path, runtime_roots: list[Path], mode="normal", state=None) -> list[str]:
     from files import BLOCKED_SUFFIXES, SECRET_NAMES, SECRET_PREFIXES, SENSITIVE_DIRECTORIES, git_repository
     # CLI overrides affect this child only, never the desktop's saved configuration.
     home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
@@ -69,28 +70,44 @@ def process_overrides(root: Path, cache: Path, runtime_roots: list[Path]) -> lis
     settings = {
         "approval_policy": '"never"', "approvals_reviewer": '"user"',
         "windows.sandbox": '"elevated"', "default_permissions": '"bridge"',
-        "features.apps": "false", "features.codex_hooks": "false",
+        "features.apps": "true" if mode == "turbo" else "false", "features.hooks": "false",
+        "features.plugins": "true" if mode == "turbo" else "false",
         "features.analytics": "false", "analytics.enabled": "false",
         "shell_environment_policy.inherit": '"none"',
         "mcp_servers": '{openaiDeveloperDocs={url="https://developers.openai.com/mcp",enabled=true,enabled_tools=["search_openai_docs","fetch_openai_doc"]}}',
-        "permissions.bridge.network.enabled": "false",
+        # Khay authorized localhost and external networking on 2026-09-14.
+        "permissions.bridge.network.enabled": "true", "features.network_proxy": "false",
     }
-    settings["plugins"] = "{" + ",".join(json.dumps(name) + "={enabled=false}" for name in plugins) + "}"
+    if mode == "turbo":
+        del settings["mcp_servers"]  # Keep the user's enabled MCPs and their own access controls.
+    if mode == "normal":
+        settings["plugins"] = "{" + ",".join(json.dumps(name) + "={enabled=false}" for name in plugins) + "}"
     # Tables merge with user/project config; an empty table would not disable inherited servers.
     disabled = ",".join(json.dumps(name) + "={enabled=false}" for name in servers - {"openaiDeveloperDocs"})
-    if disabled:
+    if disabled and mode == "normal":
         settings["mcp_servers"] = settings["mcp_servers"][:-1] + "," + disabled + "}"
-    fs = {":root": "deny", ":minimal": "read", ":tmpdir": "deny", ":slash_tmp": "deny",
+    # Khay also authorized ambient Windows reads on 2026-09-14. Writes stay scoped.
+    fs = {":root": "read", ":minimal": "read", ":tmpdir": "deny", ":slash_tmp": "deny",
           str(root): "write", str(cache): "write"}
     for path in runtime_roots:
         fs[str(path)] = "read"
     # Windows setup creates missing permission roots. Never create .git in a plain folder.
-    if git_repository(root):
+    if mode == "normal" and git_repository(root):
         fs[str(root / ".git")] = "read"
     patterns = list(SENSITIVE_DIRECTORIES | SECRET_NAMES) + [p+"*" for p in SECRET_PREFIXES] + ["*"+s for s in BLOCKED_SUFFIXES]
     for pattern in patterns:
-        for name in (pattern, "**/"+pattern):
-            fs[str(root / name)] = "deny"
+        if mode == "normal":
+            for name in (pattern, "**/"+pattern):
+                fs[str(root / name)] = "deny"
+        # Protect known secrets beside the bridge and in the user's home too.
+        for base in (Path(__file__).resolve().parent.parent, Path.home()):
+            if pattern != ".codex":  # Its sandbox executables are required; deny private data below.
+                fs[str(base / pattern)] = "deny"
+    for name in ("auth.json", "config.toml", "sessions", "archived_sessions", ".sandbox-secrets"):
+        fs[str(home / name)] = "deny"
+    if state is not None:
+        fs[str(state)] = "deny"
+    fs[str(Path(__file__).resolve().parent / ".state")] = "deny"
     settings["permissions.bridge.filesystem"] = "{glob_scan_max_depth=32," + ",".join(
         json.dumps(k) + "=" + json.dumps(v) for k, v in fs.items()) + "}"
     settings["shell_environment_policy.set"] = "{" + ",".join(
@@ -100,8 +117,11 @@ def process_overrides(root: Path, cache: Path, runtime_roots: list[Path]) -> lis
 
 class AppServer:
     def __init__(self, root: Path, state: Path, executable: str | None = None,
-                 runtime_roots: list[Path] | None = None):
+                 runtime_roots: list[Path] | None = None, mode="normal", private_state=None):
         self.root, self.state = root, state
+        self.private_state = private_state or state
+        self.mode = mode
+        self.cache = root / ".bridge-cache"
         self.executable = executable
         self.runtime_roots = runtime_roots or []
         self.process = None
@@ -116,11 +136,17 @@ class AppServer:
         self.command_ready = False
         self.command_error = "NOT_VERIFIED: run the runtime doctor."
         self.methods = set()
+        self.windows_commands = {}
 
     def start(self):
         exe = find_codex(self.executable)
-        cache = self.state / "cache"
+        cache = self.cache
+        from files import check_link_chain
+        check_link_chain(cache)
         cache.mkdir(parents=True, exist_ok=True)
+        if os.name == "nt":
+            from windows_job import preserve_owner_access
+            preserve_owner_access(self.root, cache)
         env = clean_environment(cache)
         if os.environ.get("CODEX_HOME"):
             env["CODEX_HOME"] = os.environ["CODEX_HOME"]
@@ -135,7 +161,7 @@ class AppServer:
         if not required <= schema["properties"].keys():
             raise BridgeError("UNSUPPORTED_CAPABILITY: installed Codex lacks protected streaming commands.")
         self.methods = {"command", "watch", "skills", "history", "docs"}
-        argv = [str(exe), "app-server", "--stdio", *process_overrides(self.root, cache, self.runtime_roots)]
+        argv = [str(exe), "app-server", "--stdio", *process_overrides(self.root, cache, self.runtime_roots, self.mode, self.private_state)]
         if os.name == "nt":
             from windows_job import OwnedJob
             self.job = OwnedJob()
@@ -234,11 +260,15 @@ class AppServer:
         if not self.command_ready:
             raise BridgeError("SANDBOX_UNAVAILABLE: " + self.command_error)
         try:
+            if os.name == "nt" and stream:
+                from windows_job import stream_command
+                return stream_command(self, argv, process_id, timeout)
             return self.call("command/exec", {
                 "command": list(argv), "cwd": str(self.root), "permissionProfile": "bridge",
                 "processId": process_id, "timeoutMs": int(timeout * 1000),
-                "streamStdoutStderr": stream, "outputBytesCap": 262144,
-                "env": clean_environment(self.state / "cache"),
+                # Windows rejects a custom output cap; retain the server's bounded default.
+                "streamStdoutStderr": stream,
+                "env": clean_environment(self.cache),
             }, timeout=timeout + 15)
         except BridgeError as exc:
             if str(exc).startswith("RUNTIME_TIMEOUT"):
@@ -246,34 +276,57 @@ class AppServer:
                 self.close()
             raise
 
+    def terminate(self, process_id):
+        with self.lock:
+            relay = self.windows_commands.get(process_id)
+            if relay is not None:
+                relay["stop"] = True
+                if relay["socket"] is not None:
+                    relay["socket"].sendall(b"stop\n")
+                return {}
+        return self.call("command/exec/terminate", {"processId": process_id}, timeout=8)
+
     def verify_policy(self):
         """Canaries, not private user files. Refuse commands unless all checks pass."""
         token = uuid.uuid4().hex
         canary = self.state / ("outside-" + token + ".txt")
-        script = self.state / "cache" / ("probe-" + token + ".py")
-        canary.write_text("bridge-permission-canary", encoding="utf-8")
+        bridge_canary = Path(__file__).resolve().parent.parent / (".bridge-write-canary-"+token)
+        secrets = [Path(__file__).resolve().parent.parent / (".env.bridge-canary-"+token),
+                   self.state / ("journal.sqlite3-canary-"+token)]
+        if self.mode == "normal":
+            secrets.append(self.root / (".env.bridge-canary-"+token))
+        script = self.cache / ("probe-" + token + ".py")
+        for path in [canary, bridge_canary, *secrets]:
+            path.write_text("bridge-permission-canary", encoding="utf-8")
         listener = socket.socket()
         listener.bind(("127.0.0.1", 0))
         listener.listen(1)
         port = listener.getsockname()[1]
         script.write_text(
             "import os,pathlib,socket,json\n"
-            "r={}\n"
-            "try:\n pathlib.Path(" + repr(str(canary)) + ").read_bytes(); r['outside_blocked']=False\n"
-            "except PermissionError: r['outside_blocked']=True\n"
-            "try:\n s=socket.create_connection(('127.0.0.1'," + str(port) + "),2); s.close(); r['network_blocked']=False\n"
-            "except OSError: r['network_blocked']=True\n"
+            "r={'outside_write_blocked':True,'secrets_blocked':True}\n"
+            "for path in " + repr([str(p) for p in (canary, bridge_canary)]) + ":\n"
+            " try: pathlib.Path(path).write_text('canary write'); r['outside_write_blocked']=False\n"
+            " except PermissionError: pass\n"
+            "for path in " + repr([str(p) for p in secrets]) + ":\n"
+            " try: pathlib.Path(path).read_bytes(); r['secrets_blocked']=False\n"
+            " except PermissionError: pass\n"
+            "try:\n s=socket.create_connection(('127.0.0.1'," + str(port) + "),2); s.close(); r['loopback_allowed']=True\n"
+            "except OSError: r['loopback_allowed']=False\n"
+            "try:\n s=socket.create_connection(('1.1.1.1',443),5); s.close(); r['external_network_allowed']=True\n"
+            "except OSError: r['external_network_allowed']=False\n"
             "r['key_absent']=not any(k for k in os.environ if any(x in k.upper() for x in ('API_KEY','TOKEN','SECRET','PASSWORD')))\n"
             "print(json.dumps(r))\n", encoding="utf-8")
         try:
             result = self.call("command/exec", {"command": [sys.executable, str(script)],
                 "cwd": str(self.root), "permissionProfile": "bridge", "timeoutMs": 10000,
-                "env": clean_environment(self.state / "cache")}, timeout=25)
+                "env": clean_environment(self.cache)}, timeout=25)
             checks = json.loads(result.get("stdout", ""))
             self.probe_checks = checks
             self.command_ready = result.get("exitCode") == 0 and checks == {
-                "outside_blocked": True, "network_blocked": True, "key_absent": True}
-            failed = [name for name in ("outside_blocked", "network_blocked", "key_absent") if checks.get(name) is not True]
+                "outside_write_blocked": True, "secrets_blocked": True, "external_network_allowed": True,
+                "loopback_allowed": True, "key_absent": True}
+            failed = [name for name in ("outside_write_blocked", "secrets_blocked", "external_network_allowed", "loopback_allowed", "key_absent") if checks.get(name) is not True]
             self.command_error = "" if self.command_ready else "POLICY_CHECK_FAILED: " + ", ".join(failed) + "; no unsafe fallback."
         except (BridgeError, ValueError) as exc:
             if str(exc).startswith("RUNTIME_TIMEOUT"):
@@ -283,7 +336,8 @@ class AppServer:
         finally:
             listener.close()
             script.unlink(missing_ok=True)
-            canary.unlink(missing_ok=True)
+            for path in [canary, bridge_canary, *secrets]:
+                path.unlink(missing_ok=True)
         return {"verified": self.command_ready, "error": self.command_error}
 
     def close(self):

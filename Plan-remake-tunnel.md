@@ -46,6 +46,7 @@ Project local — mở cùng thư mục trong Codex desktop
 
 App Server hỗ trợ chạy lệnh không cần tạo lượt AI, nhưng các API filesystem và MCP vẫn cần lớp kiểm soát quyền riêng của bridge. \[Tài liệu App Server](https://learn.chatgpt.com/docs/app-server)
 
+https://platform.openai.com/settings/organization/tunnels
 
 
 \## 2. Các nâng cấp cần thực hiện

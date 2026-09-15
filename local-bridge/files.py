@@ -23,7 +23,7 @@ DEFAULT_MAX_TASK_TIMEOUT = 300
 MAX_OUTPUT_CHARS = 20000
 SENSITIVE_DIRECTORIES = {".codex", ".agents", ".ssh", ".aws", ".azure", ".gnupg"}
 BLOCKED_DIRECTORIES = SENSITIVE_DIRECTORIES | {".git", ".venv", "venv", "node_modules", "__pycache__",
-                                              ".pytest_cache", ".mypy_cache"}
+                                              ".pytest_cache", ".mypy_cache", ".bridge-cache"}
 BLOCKED_SUFFIXES = {".pem", ".key", ".pfx", ".p12", ".crt", ".cer", ".env", ".der", ".jks", ".keystore", ".kdbx", ".p7b"}
 SECRET_PREFIXES = (".env", "credentials", "secrets", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa")
 SECRET_NAMES = {"auth.json", ".npmrc", ".pypirc", ".netrc", "_netrc", ".git-credentials"}
@@ -81,6 +81,8 @@ class BridgeConfig:
     codex_executable: str | None = None
     runtime_read_roots: tuple[Path, ...] = ()
     completed_changes_to_keep: int = 30
+    mode: str = "normal"
+    private_state_dir: Path | None = None
 
 
 def load_config(path: Path):
@@ -143,9 +145,10 @@ class ProjectFiles:
     def __init__(self, config):
         self.config, self.root = config, config.workspace_root
 
-    @staticmethod
-    def _is_blocked(relative):
+    def _is_blocked(self, relative):
         parts = [p.lower() for p in Path(relative).parts]
+        if self.config.mode == "turbo":
+            return ".bridge-cache" in parts
         return any(p in BLOCKED_DIRECTORIES or p in SECRET_NAMES or p.startswith(SECRET_PREFIXES)
                    or Path(p).suffix in BLOCKED_SUFFIXES for p in parts)
 

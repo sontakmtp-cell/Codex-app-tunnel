@@ -9,7 +9,7 @@ import threading
 import time
 import uuid
 
-from files import BridgeError, _bounded, _redact, integer, request_key
+from files import BridgeError, _bounded, _redact, _sha256, integer, request_key
 
 
 class TaskRunner:
@@ -38,10 +38,31 @@ class TaskRunner:
         return argv
 
     def start_task(self, task_id, request_id, timeout_seconds=120):
-        request_key(request_id)
-        integer(timeout_seconds, "timeout_seconds", 1, self.owner.config.max_task_timeout_seconds)
         if task_id not in self.owner.config.tasks:
             raise BridgeError("TASK_NOT_ALLOWED: use list_tasks for locally configured IDs.")
+        return self._start(self._command(task_id), task_id, request_id, timeout_seconds)
+
+    def execute_command(self, command, request_id, timeout_seconds=120):
+        if self.owner.config.mode != "turbo":
+            raise BridgeError("MODE_REQUIRED: select Turbo in the control panel first.")
+        if (not isinstance(command, list) or not 1 <= len(command) <= 256
+                or any(not isinstance(v, str) or "\x00" in v for v in command)
+                or not command[0].strip() or sum(map(len, command)) > 200000):
+            raise BridgeError("INVALID_INPUT: command must be an argv list without NUL (maximum 200000 characters).")
+        executable = shutil.which(command[0])
+        if not executable:
+            candidate = self.owner.root / command[0]
+            executable = str(candidate) if candidate.is_file() else None
+        if not executable or Path(executable).suffix.lower() in {".cmd", ".bat", ".ps1"}:
+            raise BridgeError("COMMAND_UNAVAILABLE: use a native executable; run shell text with bash -c or powershell -Command.")
+        argv = [str(Path(executable).resolve()), *command[1:]]
+        # Persist the command identity, not potentially sensitive script text.
+        task_id = "command-" + _sha256(json.dumps(argv, ensure_ascii=False).encode())
+        return self._start(argv, task_id, request_id, timeout_seconds)
+
+    def _start(self, argv, task_id, request_id, timeout_seconds):
+        request_key(request_id)
+        integer(timeout_seconds, "timeout_seconds", 1, self.owner.config.max_task_timeout_seconds)
         with self.owner.lock:
             prior = self.owner.db.execute("SELECT * FROM runs WHERE request_id=?", (request_id,)).fetchone()
             if prior:
@@ -51,7 +72,6 @@ class TaskRunner:
             self.owner._idle()
             if not self.runtime.command_ready:
                 raise BridgeError("SANDBOX_UNAVAILABLE: " + self.runtime.command_error)
-            argv = self._command(task_id)
             self.owner.check_command_paths()
             run_id, now = uuid.uuid4().hex, time.time()
             with self.owner.db:
@@ -79,6 +99,9 @@ class TaskRunner:
         run["pending"][stream] = pending
         if emit:
             emit = _redact(emit)
+            if len(emit) > 262144:
+                emit = emit[-262144:]
+                run["truncated"] = True
             run["events"].append({"stream": stream, "text": emit})
             run["chars"] += len(emit)
             while run["chars"] > 262144 and len(run["events"]) > 1:
@@ -155,8 +178,8 @@ class TaskRunner:
 
     def _terminate(self, run_id):
         try:
-            self.runtime.call("command/exec/terminate", {"processId": run_id}, timeout=8)
-        except BridgeError:
+            self.runtime.terminate(run_id)
+        except (BridgeError, OSError):
             pass
         # Termination can race initial spawn. A closed owned job is the fail-safe for all its children.
         if not self.runs[run_id]["done"].wait(3):
