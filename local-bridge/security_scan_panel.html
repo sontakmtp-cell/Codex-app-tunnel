@@ -1,0 +1,895 @@
+<!doctype html>
+<html lang="vi" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Security MCP App</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --font-sans: "Space Grotesk", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif;
+      --font-mono: "IBM Plex Mono", "JetBrains Mono", "SF Mono", Consolas, ui-monospace, monospace;
+      --bg: #0d0c0a;
+      --grid: #f0ead609;
+      --surface: #14130f;
+      --surface-elevated: #1b1a14;
+      --surface-subtle: #232219;
+      --surface-hover: #2a2819;
+      --border: #f0ead61f;
+      --border-subtle: #f0ead60f;
+      --border-hover: #f0ead647;
+      --text: #ece8da;
+      --text-muted: #a39e8c;
+      --text-faint: #736f5f;
+      --accent: #f1c21b;
+      --accent-2: #f1c21b;
+      --ink: #f1c21b;
+      --accent-soft: #f1c21b1f;
+      --accent-glow: #f1c21b59;
+      --ok: #7ee787;
+      --ok-soft: #7ee7871a;
+      --ok-border: #7ee7874d;
+      --danger: #f2555a;
+      --danger-soft: #f2555a1a;
+      --danger-border: #f2555a52;
+      --warning: #efaf4e;
+      --warning-soft: #efaf4e1f;
+      --warning-border: #efaf4e52;
+      --code-bg: #0a0906;
+      --radius-sm: 4px;
+      --radius-md: 6px;
+    }
+
+    [data-theme="light"] {
+      color-scheme: light;
+      --bg: #f1eee3;
+      --grid: #1e1c140e;
+      --surface: #faf8f0;
+      --surface-elevated: #efece0;
+      --surface-subtle: #e7e3d3;
+      --surface-hover: #dcd7c3;
+      --border: #1e1c1429;
+      --border-subtle: #1e1c1414;
+      --border-hover: #1e1c1452;
+      --text: #221f17;
+      --text-muted: #6e6a58;
+      --text-faint: #9b9681;
+      --accent: #d9a21e;
+      --accent-2: #7a5e08;
+      --ink: #7a5e08;
+      --accent-soft: #d9a21e24;
+      --accent-glow: #d9a21e40;
+      --ok: #1e7f3c;
+      --ok-soft: #1e7f3c1a;
+      --ok-border: #1e7f3c4d;
+      --danger: #c22b32;
+      --danger-soft: #c22b3217;
+      --danger-border: #c22b324d;
+      --warning: #96660a;
+      --warning-soft: #be78141f;
+      --warning-border: #9a64064d;
+    }
+
+    * { box-sizing: border-box; }
+    html { min-width: 320px; background: var(--bg); }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--text);
+      background-color: var(--bg);
+      background-image: linear-gradient(var(--grid) 1px, transparent 1px), linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+      background-size: 42px 42px;
+      font: 14px/1.5 var(--font-sans);
+      letter-spacing: -.01em;
+    }
+    button, textarea { font: inherit; }
+    button { cursor: pointer; }
+    button:disabled { cursor: not-allowed; opacity: .52; }
+    button:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    code, .mono { font-family: var(--font-mono); }
+    .app-shell { width: min(940px, 100%); margin: 0 auto; padding: 22px 16px 32px; }
+    .topbar, .section-heading, .card-actions, .repo-row, .status-line, .progress-label, .finding-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+    .topbar { padding: 4px 2px 20px; align-items: flex-start; }
+    .brand { display: flex; align-items: flex-start; gap: 10px; }
+    .brand-mark { color: var(--accent); font-size: 19px; line-height: 1; padding-top: 4px; text-shadow: 0 0 10px var(--accent-glow); }
+    .eyebrow { margin: 0 0 3px; color: var(--text-faint); font-size: 10px; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; }
+    h1, h2, h3, p { margin: 0; }
+    h1 { font-size: 20px; line-height: 1.15; letter-spacing: -.025em; }
+    h2 { font-size: 16px; line-height: 1.25; }
+    h3 { font-size: 13px; line-height: 1.35; }
+    .host-badge, .status-badge, .pill { display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-muted); font-size: 11px; padding: 5px 9px; white-space: nowrap; }
+    .host-badge { font-family: var(--font-mono); font-size: 10px; }
+    .status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-faint); }
+    .status-badge[data-state="connected"] .status-dot { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+    .status-badge[data-state="warning"] .status-dot { background: var(--warning); box-shadow: 0 0 6px var(--warning); }
+    .status-badge[data-state="error"] .status-dot { background: var(--danger); box-shadow: 0 0 6px var(--danger); }
+    .stack { display: grid; gap: 14px; }
+    .card { border: 1px solid var(--border); border-radius: var(--radius-md); background: color-mix(in srgb, var(--surface) 94%, transparent); box-shadow: 0 12px 30px #00000018; }
+    .card-body { padding: 18px; }
+    .section-heading { align-items: flex-start; margin-bottom: 16px; }
+    .section-heading > div:first-child { min-width: 0; }
+    .section-note { margin-top: 5px; color: var(--text-muted); font-size: 12px; }
+    .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .choice {
+      display: block;
+      position: relative;
+      min-width: 0;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      background: var(--surface-elevated);
+      color: var(--text);
+      padding: 13px;
+      text-align: left;
+      transition: border-color .15s ease, background .15s ease, transform .15s ease;
+    }
+    .choice:hover { border-color: var(--border-hover); background: var(--surface-hover); transform: translateY(-1px); }
+    .choice[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); box-shadow: 0 0 0 1px var(--accent), 0 0 18px #f1c21b12; }
+    .choice[aria-pressed="true"]::after { content: ""; position: absolute; top: 10px; right: 10px; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 7px var(--accent); }
+    .choice-title { display: flex; align-items: center; gap: 8px; font-weight: 700; }
+    .choice-title span:first-child { color: var(--accent); }
+    .choice-copy { display: block; margin-top: 5px; color: var(--text-muted); font-size: 12px; line-height: 1.45; }
+    .label { display: block; margin: 17px 0 7px; color: var(--text-muted); font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+    .repo-card { display: grid; gap: 0; margin-top: 14px; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--surface-subtle); }
+    .repo-row { min-width: 0; border-bottom: 1px solid var(--border-subtle); padding: 8px 11px; gap: 12px; }
+    .repo-row:last-child { border-bottom: 0; }
+    .repo-key { flex: 0 0 82px; color: var(--text-faint); font-size: 11px; }
+    .repo-value { min-width: 0; overflow: hidden; color: var(--text); font-size: 11px; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+    textarea { width: 100%; min-height: 82px; resize: vertical; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--code-bg); color: var(--text); padding: 11px 12px; }
+    textarea::placeholder { color: var(--text-faint); }
+    .field-hint { display: flex; justify-content: space-between; gap: 10px; margin-top: 5px; color: var(--text-faint); font-size: 10px; }
+    .primary-button, .secondary-button, .danger-button { min-height: 36px; border-radius: var(--radius-sm); padding: 8px 13px; font-weight: 700; transition: filter .15s ease, background .15s ease, border-color .15s ease; }
+    .primary-button { border: 1px solid var(--accent); background: var(--accent); color: #171406; }
+    .primary-button:hover { filter: brightness(1.08); }
+    .secondary-button { border: 1px solid var(--border-hover); background: var(--surface-elevated); color: var(--text); }
+    .secondary-button:hover { background: var(--surface-hover); }
+    .danger-button { border: 1px solid var(--danger-border); background: var(--danger-soft); color: var(--danger); }
+    .danger-button:hover { background: var(--danger); color: #fff; }
+    .card-actions { align-items: flex-end; margin-top: 17px; }
+    .muted { color: var(--text-muted); font-size: 12px; }
+    .scan-card[hidden], .notice[hidden] { display: none; }
+    .scan-card { overflow: hidden; }
+    .scan-card .card-body { padding-bottom: 12px; }
+    .scan-id { max-width: 260px; overflow: hidden; color: var(--text-faint); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+    .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 14px 0; }
+    .stat { border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); background: var(--surface-subtle); padding: 10px; }
+    .stat-label { color: var(--text-faint); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
+    .stat-value { margin-top: 2px; color: var(--text); font: 700 18px/1.2 var(--font-mono); }
+    .progress-wrap { margin-top: 15px; }
+    .progress-label { color: var(--text-muted); font-size: 11px; }
+    .progress-label strong { color: var(--text); font-weight: 700; }
+    .progress-track { height: 7px; overflow: hidden; margin-top: 8px; border-radius: 999px; background: var(--surface-subtle); }
+    .progress-bar { width: 0; height: 100%; border-radius: inherit; background: var(--accent); box-shadow: 0 0 9px var(--accent-glow); transition: width .25s ease; }
+    .findings { margin-top: 16px; border-top: 1px solid var(--border-subtle); padding-top: 14px; }
+    .finding-list { display: grid; gap: 7px; margin-top: 9px; }
+    .finding { border: 1px solid var(--border-subtle); border-left: 3px solid var(--warning); border-radius: var(--radius-sm); background: var(--surface-subtle); padding: 9px 10px; }
+    .finding[data-severity="critical"], .finding[data-severity="high"] { border-left-color: var(--danger); }
+    .finding[data-severity="low"], .finding[data-severity="info"] { border-left-color: var(--ok); }
+    .finding-title { overflow: hidden; font-size: 12px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+    .finding-meta { color: var(--text-muted); font-size: 10px; }
+    .notice { border: 1px solid var(--warning-border); border-radius: var(--radius-md); background: var(--warning-soft); color: var(--text); padding: 11px 13px; }
+    .notice.error { border-color: var(--danger-border); background: var(--danger-soft); }
+    .notice-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .notice-text { min-width: 0; font-size: 12px; }
+    .footer-note { margin-top: 15px; color: var(--text-faint); font-size: 10px; text-align: center; }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+    @media (max-width: 620px) {
+      .app-shell { padding: 16px 10px 24px; }
+      .topbar { flex-direction: column; gap: 10px; }
+      .topbar > .host-badge { align-self: flex-start; }
+      .grid-2, .stats { grid-template-columns: 1fr 1fr; }
+      .card-actions { align-items: stretch; flex-direction: column; }
+      .card-actions button { width: 100%; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app-shell" id="security-app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">◆</div>
+        <div>
+          <p class="eyebrow">Security MCP App · V1</p>
+          <h1>Security review</h1>
+        </div>
+      </div>
+      <div class="host-badge" id="host-badge"><span class="status-dot" aria-hidden="true"></span><span id="host-label">Đang kết nối…</span></div>
+    </header>
+
+    <main class="stack">
+      <section class="card" aria-labelledby="new-scan-heading">
+        <div class="card-body">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Lần quét mới</p>
+              <h2 id="new-scan-heading">Kiểm tra an toàn cho workspace</h2>
+              <p class="section-note">ChatGPT Web phân tích theo workflow cố định của Security MCP.</p>
+            </div>
+            <span class="status-badge" id="scan-status" data-state="idle"><span class="status-dot" aria-hidden="true"></span><span id="scan-status-label">Sẵn sàng</span></span>
+          </div>
+
+          <span class="label">Phạm vi</span>
+          <div class="grid-2" role="group" aria-label="Phạm vi quét">
+            <button class="choice" id="target-codebase" type="button" data-target="codebase" aria-pressed="true">
+              <span class="choice-title"><span aria-hidden="true">⌘</span><span>Cơ sở mã</span></span>
+              <span class="choice-copy">Đọc toàn bộ project cố định trong bridge.</span>
+            </button>
+            <button class="choice" id="target-changes" type="button" data-target="changes" aria-pressed="false">
+              <span class="choice-title"><span aria-hidden="true">Δ</span><span>Thay đổi</span></span>
+              <span class="choice-copy">Review working tree hiện tại nếu repo hỗ trợ.</span>
+            </button>
+          </div>
+
+          <div class="repo-card" aria-label="Thông tin repository">
+            <div class="repo-row"><span class="repo-key">Repository</span><span class="repo-value mono" id="repo-name">Đang tải…</span></div>
+            <div class="repo-row"><span class="repo-key">Project</span><span class="repo-value mono" id="repo-path">—</span></div>
+            <div class="repo-row"><span class="repo-key">Branch</span><span class="repo-value mono" id="repo-branch">—</span></div>
+            <div class="repo-row"><span class="repo-key">Commit</span><span class="repo-value mono" id="repo-commit">—</span></div>
+          </div>
+
+          <span class="label">Review mode</span>
+          <div class="grid-2" role="group" aria-label="Review mode">
+            <button class="choice" id="review-standard" type="button" data-mode="standard" aria-pressed="true">
+              <span class="choice-title"><span aria-hidden="true">01</span><span>Standard</span></span>
+              <span class="choice-copy">Một discovery pass, validate trước khi chốt finding.</span>
+            </button>
+            <button class="choice" id="review-chatgpt-deep" type="button" data-mode="chatgpt_deep" aria-pressed="false">
+              <span class="choice-title"><span aria-hidden="true">03</span><span>ChatGPT Deep</span></span>
+              <span class="choice-copy">Ba pass độc lập do ChatGPT Web điều phối.</span>
+            </button>
+          </div>
+
+          <label class="label" for="user-context">Ngữ cảnh bổ sung <span class="sr-only">tùy chọn</span></label>
+          <textarea id="user-context" maxlength="2000" placeholder="Ví dụ: ưu tiên luồng xác thực và xử lý file…"></textarea>
+          <div class="field-hint"><span>Không gửi path tùy ý; bridge giữ target cố định.</span><span id="context-count">0 / 2000</span></div>
+
+          <div class="card-actions">
+            <p class="muted" id="start-help">Kết quả và trạng thái luôn được đọc lại từ Security MCP.</p>
+            <button class="primary-button" id="start-scan" type="button">Bắt đầu quét</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="card scan-card" id="scan-card" aria-labelledby="scan-heading" hidden>
+        <div class="card-body">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Trạng thái authoritative</p>
+              <h2 id="scan-heading">Đang theo dõi Security scan</h2>
+              <p class="scan-id mono" id="scan-id">—</p>
+            </div>
+            <span class="status-badge" id="live-status" data-state="connected"><span class="status-dot" aria-hidden="true"></span><span id="live-status-label">Đang chạy</span></span>
+          </div>
+
+          <div class="stats" aria-label="Tiến độ scan">
+            <div class="stat"><div class="stat-label">Phase hiện tại</div><div class="stat-value" id="scan-phase">—</div></div>
+            <div class="stat"><div class="stat-label">Tiếp theo</div><div class="stat-value" id="scan-next-phase">—</div></div>
+            <div class="stat"><div class="stat-label">Findings</div><div class="stat-value" id="finding-total">0</div></div>
+            <div class="stat"><div class="stat-label">Cập nhật</div><div class="stat-value" id="scan-updated" title="">—</div></div>
+          </div>
+
+          <div class="progress-wrap">
+            <div class="progress-label"><span id="progress-copy">Đang lấy trạng thái…</span><strong id="progress-percent">0%</strong></div>
+            <div class="progress-track" id="progress-track" role="progressbar" aria-label="Tiến độ Security scan" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="progress-bar" id="progress-bar"></div></div>
+          </div>
+
+          <div class="findings">
+            <div class="finding-head"><h3>Findings đã ghi nhận</h3><span class="pill" id="coverage-label">Coverage: —</span></div>
+            <div class="finding-list" id="finding-list"><p class="muted">Chưa có finding nào.</p></div>
+          </div>
+
+          <div class="card-actions">
+            <p class="muted" id="scan-help">Không tạo scan mới khi đang theo dõi scan này.</p>
+            <button class="danger-button" id="cancel-scan" type="button">Hủy scan</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="notice" id="message-notice" hidden role="alert">
+        <div class="notice-row">
+          <span class="notice-text" id="message-notice-text"></span>
+          <button class="secondary-button" id="retry-message" type="button">Gửi lại message</button>
+        </div>
+      </section>
+    </main>
+    <p class="footer-note">Security MCP là nguồn trạng thái duy nhất · Widget chỉ giữ state trình bày trong phiên hiện tại.</p>
+  </div>
+
+  <script>
+    (() => {
+      "use strict";
+
+      const PHASES = ["preflight", "inventory", "threat_model", "discovery", "attack_surface", "auth_data_flow", "injection_file_process_network_state", "deduplicate", "validation", "attack_path", "finalization", "complete"];
+      const PHASE_LABELS = {
+        preflight: "Preflight",
+        inventory: "Inventory",
+        threat_model: "Threat model",
+        discovery: "Discovery",
+        attack_surface: "Attack surface",
+        auth_data_flow: "Auth & data flow",
+        injection_file_process_network_state: "Injection / file / process / network / state",
+        deduplicate: "Deduplicate",
+        validation: "Validation",
+        attack_path: "Attack path",
+        finalization: "Finalization",
+        complete: "Complete"
+      };
+      const STATUS_LABELS = {
+        idle: "Sẵn sàng",
+        pending: "Đang chờ",
+        running: "Đang chạy",
+        in_progress: "Đang chạy",
+        completed: "Hoàn tất",
+        failed: "Thất bại",
+        cancelled: "Đã hủy"
+      };
+      const TERMINAL = new Set(["completed", "failed", "cancelled"]);
+      const $ = (id) => document.getElementById(id);
+      const state = {
+        selectedMode: "standard",
+        selectedTarget: "codebase",
+        requestId: null,
+        cancelRequestId: null,
+        scanId: null,
+        scan: null,
+        repo: null,
+        latestScan: null,
+        startBusy: false,
+        cancelBusy: false,
+        messageBusy: false,
+        messagePending: false,
+        notice: "",
+        noticeError: false,
+        pollTimer: null,
+        pollBusy: false
+      };
+
+      function newId(prefix) {
+        const cryptoApi = globalThis.crypto;
+        return cryptoApi && typeof cryptoApi.randomUUID === "function"
+          ? cryptoApi.randomUUID()
+          : `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+      }
+
+      function text(value, fallback = "—") {
+        return value === null || value === undefined || value === "" ? fallback : String(value);
+      }
+
+      function isRunning(scan = state.scan) {
+        return Boolean(scan && !TERMINAL.has(String(scan.status || "").toLowerCase()));
+      }
+
+      function isTerminal(scan = state.scan) {
+        return Boolean(scan && TERMINAL.has(String(scan.status || "").toLowerCase()));
+      }
+
+      function phaseLabel(phase) {
+        const key = String(phase || "").toLowerCase();
+        return PHASE_LABELS[key] || text(phase);
+      }
+
+      function errorText(error) {
+        return text(error && error.message, "MCP request failed.");
+      }
+
+      function unpack(result) {
+        if (result && result.isError) {
+          const message = Array.isArray(result.content) ? result.content.map((item) => item.text || "").join("\n") : "Tool báo lỗi.";
+          throw new Error(message || "Tool báo lỗi.");
+        }
+        if (result && result.structuredContent !== undefined) return result.structuredContent;
+        if (result && result.result && result.result.structuredContent !== undefined) return result.result.structuredContent;
+        if (result && Array.isArray(result.content)) {
+          const raw = result.content.filter((item) => item && item.type === "text").map((item) => item.text).join("\n");
+          if (raw) {
+            try { return JSON.parse(raw); } catch (_) { return { message: raw }; }
+          }
+        }
+        return result || {};
+      }
+
+      function scanFrom(payload) {
+        const data = unpack(payload);
+        return data && (data.scan || data.activeScan || data.active_scan || data);
+      }
+
+      function normalizeScan(payload) {
+        const scan = scanFrom(payload);
+        if (!scan || typeof scan !== "object") return null;
+        const scanId = scan.scanId || scan.scan_id;
+        return scanId ? { ...scan, scanId: String(scanId) } : null;
+      }
+
+      function displayTime(value) {
+        if (!value) return "—";
+        const date = new Date(value);
+        return Number.isNaN(date.getTime()) ? text(value) : date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      }
+
+      function statusKey(scan) {
+        return String(scan && scan.status || "idle").toLowerCase();
+      }
+
+      function setStatus(element, labelElement, status) {
+        const key = statusKey({ status });
+        const stateKey = key === "running" || key === "in_progress" || key === "pending" ? "connected" : key === "failed" ? "error" : key === "cancelled" ? "warning" : "idle";
+        element.dataset.state = stateKey;
+        labelElement.textContent = STATUS_LABELS[key] || text(status, "Sẵn sàng");
+      }
+
+      function setNotice(message, isError = false) {
+        state.notice = message || "";
+        state.noticeError = isError;
+        $("message-notice").hidden = !state.notice;
+        $("message-notice").classList.toggle("error", isError);
+        $("message-notice-text").textContent = state.notice;
+        $("retry-message").hidden = !state.messagePending;
+      }
+
+      function scanProgress(scan) {
+        const explicit = scan && (scan.progressPct ?? scan.progress_percent ?? scan.progress);
+        if (typeof explicit === "number" && Number.isFinite(explicit)) return Math.max(0, Math.min(100, explicit <= 1 ? explicit * 100 : explicit));
+        const phase = String(scan && (scan.phase || scan.currentPhase) || "preflight").toLowerCase();
+        if (phase === "complete" || statusKey(scan) === "completed") return 100;
+        const index = Math.max(0, PHASES.indexOf(phase));
+        return Math.round((index / (PHASES.length - 1)) * 100);
+      }
+
+      function findingCounts(scan) {
+        const counts = scan && (scan.findingCounts || scan.finding_counts || {});
+        const findings = Array.isArray(scan && scan.findings) ? scan.findings : [];
+        const total = Number(counts.total ?? counts.all ?? (scan && scan.findingCount) ?? findings.length) || 0;
+        return {
+          total,
+          critical: Number(counts.critical) || 0,
+          high: Number(counts.high) || 0,
+          medium: Number(counts.medium) || 0,
+          low: Number(counts.low) || 0
+        };
+      }
+
+      function renderFindings(scan) {
+        const list = $("finding-list");
+        list.replaceChildren();
+        const findings = Array.isArray(scan && scan.findings) ? scan.findings.slice(0, 8) : [];
+        if (!findings.length) {
+          const empty = document.createElement("p");
+          empty.className = "muted";
+          empty.textContent = "Chưa có finding nào.";
+          list.appendChild(empty);
+          return;
+        }
+        findings.forEach((finding) => {
+          const row = document.createElement("div");
+          const severity = String(finding.severity || "medium").toLowerCase();
+          row.className = "finding";
+          row.dataset.severity = severity;
+          const title = document.createElement("div");
+          title.className = "finding-title";
+          title.textContent = text(finding.title || finding.name, "Untitled finding");
+          const meta = document.createElement("div");
+          meta.className = "finding-meta mono";
+          meta.textContent = [severity.toUpperCase(), finding.path || finding.file, finding.line ? `line ${finding.line}` : ""].filter(Boolean).join(" · ");
+          row.append(title, meta);
+          list.appendChild(row);
+        });
+      }
+
+      function renderRepo(repo) {
+        if (!repo || typeof repo !== "object") return;
+        state.repo = repo;
+        $("repo-name").textContent = text(repo.name || repo.repository || repo.repo);
+        $("repo-path").textContent = text(repo.path || repo.projectPath || repo.workspace_root);
+        $("repo-branch").textContent = text(repo.branch || repo.ref);
+        $("repo-commit").textContent = text(repo.commit || repo.commitSha || repo.sha);
+      }
+
+      function renderScan() {
+        const scan = state.scan;
+        $("scan-card").hidden = !scan;
+        $("start-scan").disabled = state.startBusy || isRunning(scan);
+        $("cancel-scan").disabled = state.cancelBusy || !isRunning(scan);
+        $("cancel-scan").hidden = !isRunning(scan);
+        $("start-help").textContent = state.startBusy ? "Đang tạo scan…" : isRunning(scan) ? "Scan đang chạy; không tạo scan mới." : "Kết quả và trạng thái luôn được đọc lại từ Security MCP.";
+        if (!scan) {
+          setStatus($("scan-status"), $("scan-status-label"), "idle");
+          return;
+        }
+        $("scan-id").textContent = scan.scanId;
+        setStatus($("scan-status"), $("scan-status-label"), scan.status);
+        setStatus($("live-status"), $("live-status-label"), scan.status);
+        const phase = scan.phase || scan.currentPhase;
+        const next = scan.nextPhase || scan.next_phase;
+        $("scan-phase").textContent = phaseLabel(phase);
+        $("scan-next-phase").textContent = phaseLabel(next);
+        const counts = findingCounts(scan);
+        $("finding-total").textContent = String(counts.total);
+        const progress = Math.round(scanProgress(scan));
+        $("progress-percent").textContent = `${progress}%`;
+        $("progress-bar").style.width = `${progress}%`;
+        $("progress-track").setAttribute("aria-valuenow", String(progress));
+        $("progress-copy").textContent = isTerminal(scan) ? (STATUS_LABELS[statusKey(scan)] || "Đã kết thúc") : `Phase: ${phaseLabel(phase)}`;
+        $("scan-updated").textContent = displayTime(scan.updatedAt || scan.updated_at);
+        $("scan-updated").title = text(scan.updatedAt || scan.updated_at);
+        const coverage = scan.coverageSoFar || scan.coverage || scan.coverage_so_far;
+        $("coverage-label").textContent = `Coverage: ${typeof coverage === "number" ? `${Math.round(coverage * (coverage <= 1 ? 100 : 1))}%` : text(coverage)}`;
+        renderFindings(scan);
+      }
+
+      function renderSelections() {
+        document.querySelectorAll("[data-mode]").forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.mode === state.selectedMode)));
+        document.querySelectorAll("[data-target]").forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.target === state.selectedTarget)));
+      }
+
+      function setScan(nextScan) {
+        const scan = normalizeScan(nextScan);
+        if (!scan) return false;
+        if (state.scanId && scan.scanId !== state.scanId) return false;
+        state.scanId = state.scanId || scan.scanId;
+        state.scan = { ...(state.scan || {}), ...scan, scanId: state.scanId };
+        if (!state.requestId && (scan.requestId || scan.request_id)) state.requestId = scan.requestId || scan.request_id;
+        renderScan();
+        schedulePoll();
+        return true;
+      }
+
+      function applyPanelData(payload) {
+        const data = unpack(payload);
+        if (!data || typeof data !== "object") return;
+        renderRepo(data.repo || data.repository || data.repoMetadata || data.repo_metadata);
+        const active = normalizeScan(data.activeScan || data.active_scan || (data.scanId || data.scan_id ? data : null));
+        const latest = normalizeScan(data.latestScan || data.latest_scan);
+        if (latest) state.latestScan = latest;
+        if (active && (!state.scanId || active.scanId === state.scanId || isRunning(active))) setScan(active);
+        else if (!state.scan && latest) setScan(latest);
+        if (Array.isArray(data.supportedTargets)) {
+          const changesButton = $("target-changes");
+          const supported = data.supportedTargets.map(String).includes("changes");
+          changesButton.disabled = !supported;
+          if (!supported && state.selectedTarget === "changes") {
+            state.selectedTarget = "codebase";
+            renderSelections();
+          }
+        }
+        renderScan();
+      }
+
+      function promptForScan(scan) {
+        return [
+          "Security scan đã được tạo.",
+          `Hãy tiếp tục đúng scanId=${scan.scanId}.`,
+          "Không tạo scan mới; mọi thao tác tiếp theo phải dùng scanId này.",
+          `ReviewMode=${scan.reviewMode || scan.review_mode || state.selectedMode}.`,
+          "Hãy đọc authoritative state bằng security_get_scan/security_continue_scan và tuân thủ workflow phase của bridge."
+        ].join("\n");
+      }
+
+      function promptForStart(args) {
+        return [
+          "Người dùng vừa nhấn nút Bắt đầu quét trong Security MCP App.",
+          "Widget đã dispatch security_start_scan với request_id bên dưới; hãy gọi hoặc replay đúng tool với đúng arguments để lấy scanId authoritative.",
+          "Không tạo scan mới và không đổi request_id; bridge sẽ trả lại cùng scanId nếu request đã được widget xử lý.",
+          `security_start_scan arguments=${JSON.stringify(args)}`,
+          "Ngay sau khi nhận scanId, hãy gọi security_get_scan rồi security_continue_scan và chạy toàn bộ workflow đúng phase cho tới security_complete_scan.",
+          "Không dùng native Deep/Codex worker."
+        ].join("\n");
+      }
+
+      function schedulePoll() {
+        if (state.pollTimer) clearTimeout(state.pollTimer);
+        if (!isRunning() || !state.scanId) return;
+        state.pollTimer = setTimeout(() => refreshScan(), 2000);
+      }
+
+      function setHostTheme(theme) {
+        const value = String(theme || "").toLowerCase() === "light" ? "light" : "dark";
+        document.documentElement.dataset.theme = value;
+      }
+
+      class McpAppsClient {
+        constructor() {
+          this.pending = new Map();
+          this.ready = false;
+          this.inFrame = typeof window !== "undefined" && window.parent !== window;
+          this.mode = this.inFrame ? "connecting" : "local";
+          this.onToolResult = null;
+          this.localScan = null;
+          this.localLatest = null;
+          this.handleMessage = this.handleMessage.bind(this);
+          window.addEventListener("message", this.handleMessage, { passive: true });
+        }
+
+        handleMessage(event) {
+          if (this.inFrame && event.source && event.source !== window.parent) return;
+          const message = event.data;
+          if (!message || message.jsonrpc !== "2.0") return;
+          if (message.id !== undefined && this.pending.has(message.id)) {
+            const pending = this.pending.get(message.id);
+            this.pending.delete(message.id);
+            clearTimeout(pending.timer);
+            if (message.error) pending.reject(new Error(message.error.message || "MCP request failed."));
+            else pending.resolve(message.result);
+            return;
+          }
+          if (message.method === "ui/notifications/tool-result") {
+            try { this.onToolResult && this.onToolResult(unpack(message.params || {})); } catch (error) { setNotice(errorText(error), true); }
+          }
+          if (message.method === "ui/notifications/host-context-changed") setHostTheme(message.params && message.params.theme);
+        }
+
+        request(method, params = {}, timeout = 5000) {
+          if (!this.inFrame) return Promise.reject(new Error("MCP Apps host unavailable."));
+          const id = newId("rpc");
+          return new Promise((resolve, reject) => {
+            const timer = setTimeout(() => {
+              this.pending.delete(id);
+              reject(new Error(`MCP request timed out: ${method}`));
+            }, timeout);
+            this.pending.set(id, { resolve, reject, timer });
+            window.parent.postMessage({ jsonrpc: "2.0", id, method, params }, "*");
+          });
+        }
+
+        notify(method, params = {}) {
+          if (this.inFrame) window.parent.postMessage({ jsonrpc: "2.0", method, params }, "*");
+        }
+
+        async initialize() {
+          if (!this.inFrame) return;
+          try {
+            const result = await this.request("ui/initialize", {
+              protocolVersion: "2026-07-28",
+              appInfo: { name: "security-scan-v1", version: "1.0.0" },
+              appCapabilities: { tools: { listChanged: false } }
+            }, 1500);
+            this.ready = true;
+            this.mode = "mcp";
+            setHostTheme(result && result.hostContext && result.hostContext.theme);
+            this.notify("ui/notifications/initialized", {});
+          } catch (_) {
+            this.ready = false;
+            this.mode = window.openai && typeof window.openai.callTool === "function" ? "openai" : "unavailable";
+          }
+        }
+
+        async callTool(name, args = {}) {
+          if (this.ready) {
+            try { return unpack(await this.request("tools/call", { name, arguments: args })); }
+            catch (_) { this.ready = false; }
+          }
+          if (window.openai && typeof window.openai.callTool === "function") {
+            this.mode = "openai";
+            return unpack(await window.openai.callTool(name, args));
+          }
+          if (!this.inFrame) return this.localCall(name, args);
+          throw new Error("MCP Apps bridge chưa sẵn sàng.");
+        }
+
+        async sendMessage(message) {
+          const params = { content: [{ type: "text", text: message }], role: "user" };
+          // ChatGPT compatibility must run before any MCP round-trip so the
+          // original button activation remains available to the host.
+          if (window.openai && typeof window.openai.sendFollowUpMessage === "function") {
+            this.mode = "openai";
+            await window.openai.sendFollowUpMessage({ prompt: message, scrollToBottom: true });
+            return "openai";
+          }
+          if (this.ready) {
+            try {
+              const result = await this.request("ui/message", params);
+              if (result && result.isError) throw new Error("Host từ chối ui/message.");
+              return "mcp";
+            }
+            catch (_) { this.ready = false; }
+          }
+          if (window.openai && typeof window.openai.sendFollowUpMessage === "function") {
+            this.mode = "openai";
+            await window.openai.sendFollowUpMessage({ prompt: message, scrollToBottom: true });
+            return "openai";
+          }
+          if (!this.inFrame) return "local";
+          throw new Error("Host không nhận được ui/message.");
+        }
+
+        localCall(name, args) {
+          if (name === "show_security_scan_panel") return { repo: { name: "local preview", path: "project-path.txt", branch: "working tree", commit: "—" }, supportedTargets: ["codebase", "changes"], activeScan: this.localScan, latestScan: this.localLatest };
+          if (name === "security_start_scan") {
+            this.localScan = { scanId: newId("local-scan"), reviewMode: args.review_mode, target: args.target, status: "running", phase: "preflight", nextPhase: "inventory", progress: 0, findingCounts: { total: 0 }, updatedAt: new Date().toISOString() };
+            return this.localScan;
+          }
+          if (name === "security_get_scan") return this.localScan || this.localLatest || {};
+          if (name === "security_cancel_scan") {
+            if (this.localScan) this.localScan = { ...this.localScan, status: "cancelled", updatedAt: new Date().toISOString() };
+            this.localLatest = this.localScan;
+            return this.localScan || {};
+          }
+          return {};
+        }
+      }
+
+      const client = new McpAppsClient();
+      client.onToolResult = applyPanelData;
+
+      async function refreshPanel() {
+        try {
+          const result = await client.callTool("show_security_scan_panel", {});
+          applyPanelData(result);
+          $("host-badge").dataset.state = "connected";
+          $("host-label").textContent = client.mode === "mcp" ? "MCP Apps bridge" : client.mode === "openai" ? "ChatGPT compatibility" : "Local preview";
+        } catch (error) {
+          $("host-badge").dataset.state = "error";
+          $("host-label").textContent = "Bridge unavailable";
+          const output = window.openai && window.openai.toolOutput;
+          if (output) applyPanelData(output);
+          setNotice(errorText(error), true);
+        }
+      }
+
+      async function refreshScan() {
+        if (!state.scanId || state.pollBusy) return;
+        state.pollBusy = true;
+        try {
+          const result = await client.callTool("security_get_scan", { scan_id: state.scanId });
+          const scan = normalizeScan(result);
+          if (scan && scan.scanId === state.scanId) setScan(scan);
+          setNotice(state.notice, state.noticeError);
+        } catch (error) {
+          if (isRunning()) setNotice(`Không đọc được trạng thái scan: ${errorText(error)}`, true);
+        } finally {
+          state.pollBusy = false;
+          schedulePoll();
+        }
+      }
+
+      async function sendScanMessage() {
+        const scanId = state.scanId;
+        if (!scanId || !state.scan) return;
+        const prompt = promptForScan(state.scan);
+        state.messageBusy = true;
+        state.messagePending = false;
+        renderScan();
+        try {
+          await client.sendMessage(prompt);
+          state.notice = "ChatGPT Web đã nhận scanId; workflow có thể tiếp tục.";
+          state.noticeError = false;
+        } catch (error) {
+          state.messagePending = true;
+          state.notice = `Không gửi được ui/message. Scan vẫn giữ nguyên: ${scanId}.`;
+          state.noticeError = true;
+        } finally {
+          state.messageBusy = false;
+          setNotice(state.notice, state.noticeError);
+          renderScan();
+        }
+      }
+
+      function prepareStart() {
+        if (state.startBusy || isRunning()) return;
+        if (isTerminal()) {
+          // A cancelled/completed scan is immutable; a new scan gets a new
+          // request id and a fresh transient presentation state.
+          state.requestId = null;
+          state.cancelRequestId = null;
+          state.scanId = null;
+          state.scan = null;
+        }
+        state.startBusy = true;
+        state.requestId = state.requestId || newId("security-request");
+        state.cancelRequestId = null;
+        state.messagePending = false;
+        setNotice("", false);
+        renderScan();
+        const args = { review_mode: state.selectedMode, target: state.selectedTarget, request_id: state.requestId };
+        const context = $("user-context").value.trim();
+        if (context) args.user_context = context;
+        state.messageBusy = true;
+        renderScan();
+        return args;
+      }
+
+      function startScan() {
+        const args = prepareStart();
+        if (!args) return;
+
+        // Invoke the ChatGPT compatibility API directly from the click call
+        // stack. Waiting for the tool round-trip loses user activation.
+        let messagePromise;
+        if (window.openai && typeof window.openai.sendFollowUpMessage === "function") {
+          client.mode = "openai";
+          try {
+            messagePromise = Promise.resolve(window.openai.sendFollowUpMessage({ prompt: promptForStart(args), scrollToBottom: true }));
+          } catch (error) {
+            messagePromise = Promise.reject(error);
+            messagePromise.catch(() => {});
+          }
+        } else {
+          messagePromise = client.sendMessage(promptForStart(args));
+        }
+        const startPromise = client.callTool("security_start_scan", args);
+        void finishStart(startPromise, messagePromise);
+      }
+
+      async function finishStart(startPromise, messagePromise) {
+        try {
+          const result = await startPromise;
+          const scan = normalizeScan(result);
+          if (!scan || !scan.scanId) throw new Error("security_start_scan không trả scanId hợp lệ.");
+          if (state.scanId && state.scanId !== scan.scanId) throw new Error("Server trả scanId khác với scan đang theo dõi.");
+          setScan({ ...scan, reviewMode: scan.reviewMode || state.selectedMode, target: scan.target || state.selectedTarget });
+        } catch (error) {
+          setNotice(errorText(error), true);
+        }
+        try {
+          await messagePromise;
+          if (state.scanId) {
+            setNotice(`Đã gửi lệnh tự động; ChatGPT đang tiếp tục scanId=${state.scanId}.`, false);
+          }
+        } catch (error) {
+          state.messagePending = true;
+          setNotice(`Không gửi được lệnh tự động. Scan vẫn giữ nguyên: ${state.scanId || "đang khởi tạo"}.`, true);
+        }
+        try {
+          await refreshScan();
+        } catch (_) {
+          // refreshScan already reports an authoritative read failure.
+        } finally {
+          state.startBusy = false;
+          state.messageBusy = false;
+          renderScan();
+        }
+      }
+
+      async function cancelScan() {
+        if (state.cancelBusy || !state.scanId || !isRunning()) return;
+        state.cancelBusy = true;
+        state.cancelRequestId = state.cancelRequestId || newId("security-cancel");
+        renderScan();
+        try {
+          const result = await client.callTool("security_cancel_scan", { scan_id: state.scanId, request_id: state.cancelRequestId });
+          const scan = normalizeScan(result);
+          setScan(scan || { scanId: state.scanId, status: "cancelled" });
+          if (!scan) state.scan = { ...(state.scan || {}), status: "cancelled" };
+          state.messagePending = false;
+          setNotice("Scan đã được yêu cầu hủy. Các write tiếp theo phải bị bridge từ chối.", false);
+        } catch (error) {
+          setNotice(`Không hủy được scan: ${errorText(error)}`, true);
+        } finally {
+          state.cancelBusy = false;
+          renderScan();
+        }
+      }
+
+      document.querySelectorAll("[data-mode]").forEach((button) => button.addEventListener("click", () => {
+        if (!isRunning()) { state.selectedMode = button.dataset.mode; renderSelections(); }
+      }));
+      document.querySelectorAll("[data-target]").forEach((button) => button.addEventListener("click", () => {
+        if (!isRunning() && !button.disabled) { state.selectedTarget = button.dataset.target; renderSelections(); }
+      }));
+      $("user-context").addEventListener("input", (event) => { $("context-count").textContent = `${event.target.value.length} / 2000`; });
+      $("start-scan").addEventListener("click", startScan);
+      $("cancel-scan").addEventListener("click", cancelScan);
+      $("retry-message").addEventListener("click", sendScanMessage);
+
+      if (window.openai && window.openai.theme) setHostTheme(window.openai.theme);
+      if (window.openai && window.openai.toolOutput) applyPanelData(window.openai.toolOutput);
+      renderSelections();
+      renderScan();
+
+      window.__securityScanWidget = {
+        client,
+        refresh: refreshPanel,
+        refreshScan,
+        sendScanMessage,
+        getState: () => ({ ...state, scan: state.scan && { ...state.scan }, repo: state.repo && { ...state.repo } })
+      };
+
+      (async () => {
+        await client.initialize();
+        await refreshPanel();
+      })();
+    })();
+  </script>
+</body>
+</html>

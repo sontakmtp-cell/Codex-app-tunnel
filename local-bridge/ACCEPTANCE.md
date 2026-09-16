@@ -21,8 +21,8 @@
 | E — chỉ hai Docs MCP, không mở model turn, tắt MCP/plugin khác riêng cho child | **Chưa đạt:** search/fetch Docs thật đã qua, nhưng `mcpServerStatus/list` còn thấy `codex-security` và `openai-api-key-local-confirmation` ngoài `openaiDeveloperDocs`. Không nới policy để che lỗi này. |
 | E — đọc skill đã tìm, giới hạn thư mục, không chạy script | **Đạt:** discovery/read thật; kiểm thử từ chối đường dẫn tham chiếu thoát thư mục và ID tự bịa. |
 | E — chỉ đọc hội thoại đúng project, không tiếp tục/sửa | **Đạt phạm vi kiểm tra:** request list có cwd, lọc kết quả, đọc metadata kiểm tra cwd trước khi lấy nội dung; giới hạn văn bản user/assistant và bỏ output riêng tư. Live project mẫu trả danh sách rỗng đúng phạm vi. |
-| F — MCP Apps HTML, ba phần, diff theo file, Apply/Undo thật | **Đạt local và live:** `test_ui.cjs` chạy MCP `2026-07-28`, Chromium, diff/apply/undo và XSS; ChatGPT mới render đúng `ui://local-bridge/control-panel-v2.html`, không còn template cũ. Panel live báo `Đã kết nối`, `commands_enabled` và ba task khả dụng. |
-| F — không mở lại bảng khi đọc dữ liệu, polling 2 giây khi thấy task chạy | **Đạt cấu trúc/logic và mở lại panel live;** polling/task thật trên ChatGPT chưa chạy đến cuối, nhưng nút `Chạy` đã được mở sau doctor. Chỉ `show_control_panel` có resource UI. |
+| F — MCP Apps UI, bốn tab React/Vite, diff theo file, Apply/Undo thật | **Đạt local; cần xác nhận live sau khi restart tunnel:** `panel.html` là resource tự chứa được build từ `H:/AI/panel-new`; `test_ui.cjs` chạy MCP `2026-07-28`, Chromium, chuyển tab Runtime/Changes/Tasks/Workspace, diff/apply/undo và XSS. ChatGPT vẫn dùng đúng `ui://local-bridge/control-panel-v2.html`; cần làm mới app để bỏ resource cache. |
+| F — không mở lại bảng khi đọc dữ liệu, polling 2 giây khi thấy task chạy | **Đạt cấu trúc/logic và mở lại panel live;** polling/task thật trên ChatGPT chưa chạy đến cuối, nhưng nút `Chạy` đã được mở sau doctor. `show_control_panel` và `show_security_scan_panel` dùng hai resource UI riêng; data tools chỉ cập nhật bề mặt đang mở. |
 | F — text an toàn, không thực thi HTML từ project | **Đạt kiểm thử Chromium với MCP server thật và host mẫu:** `test_ui.cjs`, [ảnh kiểm thử](../output/playwright/control-panel-applied.png). Bài này dùng file chứa HTML và xác nhận không tạo thẻ ảnh/thực thi script. |
 | Tương thích sáu tool cũ | **Đạt:** [legacy-signatures.json](.verification/legacy-signatures.json) đối chiếu bản gốc; chỉ `read_file` thêm `end_line`. Write/patch cũ cùng journal; run_task cũ cùng runner. |
 | Chống gửi lại yêu cầu và mất kết nối qua tunnel | **Đạt với đợt sửa:** bảng tải lại sau tunnel ngắt, vẫn thấy đợt pending; gửi lại đúng hai ID Apply/Undo sau hoàn tác đều trả `undone`, không tạo lại file. |
@@ -54,3 +54,25 @@ Không hạ Codex hoặc bỏ canary Normal để làm kết quả xanh. Turbo c
 Đã reload tunnel để child Codex nhận profile mới, chạy lại doctor và kiểm tra task App Server thật. Bước còn lại là xử lý MCP child dư và kiểm tra nút Chạy/Dừng từ ChatGPT; nếu canary đọc ngoài hoặc egress thất bại ở project tương lai, bridge vẫn khóa task.
 
 Khi doctor đạt, vào Settings → Apps → Codex app → Làm mới để host bỏ resource cache cũ, rồi kiểm tra `show_control_panel` trong tunnel. Chi tiết cách chạy và dùng bridge nằm trong [README.md](README.md).
+
+## Security MCP V1 theo `PLAN.md` — 2026-09-16
+
+| Gate | Kết quả và bằng chứng |
+|---|---|
+| 1 — Direct MCP | **Đạt local:** adapter chạy `codex-security` trực tiếp bằng bundled Node/STDIO, allowlist cố định, môi trường sạch, không model/native deep; direct adapter tests và probe thật xác nhận start/get/cancel. |
+| 2 — Bridge contract | **Đạt local:** đúng 9 Security facade tools; schema không lộ `native_deep`, native lifecycle, `reasoningEffort` hay worker; restart STDIO trả lại cùng `scanId`, conflict/terminal guard/idempotency đã test. |
+| 3 — Workflow | **Đạt local/native:** standard chạy đủ 7 checkpoint → complete; `chatgpt_deep` chạy đủ 10 checkpoint → complete. Probe restart thật giữ nguyên `scanId`, phase đã commit không chạy lại và tiếp tục đúng `nextPhase`. Hai mode có phase sequence typed, resume/checkpoint/terminal guard và không tạo Codex worker. Adapter tự claim/deliver handoff nội bộ bằng token bền vững; các pass Deep của ChatGPT chỉ dùng progress `review_receipts` trên native app-only standard session, không gửi `deepReviewPass`/native Deep. |
+| 4 — Widget | **Đạt local + host retest:** `security-scan-v1` là resource riêng, MCP Apps `tools/call`/`ui/message` trước fallback, retry message không tạo scan thứ hai, cancel giữ nguyên `scanId`; Playwright security widget và `control-panel-v2` đều pass. |
+| 5 — ChatGPT Web thật | **Đạt:** sau khi restart tunnel và làm mới resource, widget đã chạy Standard qua `scanId=ad009b3f-eb9d-4cb6-878e-2397f49c3fa2` tới `completed` theo `threat_model → discovery → validation → attack_path → finalization → complete`. Text command `Phân tích bằng ChatGPT Deep` và nút `ChatGPT Deep` đã chạy scan `e4746214-5a60-413b-8e27-293ca9a2b350` tới `completed` theo đủ `preflight → inventory → threat_model → Pass 1 → Pass 2 → Pass 3 → deduplicate → validation → attack_path → finalization → complete`. Cả hai đều dùng đúng scanId, không tạo native Deep/Codex worker, 0 finding hợp lệ. Trong lần retest thủ công ngày 2026-09-16, sau khi gỡ và cài lại plugin MCP Bridge local, bấm `Bắt đầu quét` đã tự động chạy workflow ngay, không cần gửi thêm lệnh trong chat. `healthz/readyz` không được dùng thay cho bằng chứng này. Target live là `H:/AI/New folder` (12 file tài liệu/log, không phải source của bridge), nên đây là bằng chứng connector/workflow end-to-end, không phải security audit của `H:/AI/Codex-app-tunnel`. |
+
+### Reverification 2026-09-16
+
+- Full Python suite bằng runtime của tunnel: **44/44 tests passed**.
+- `test_security_ui.cjs`: **PASS** (Playwright DOM/MCP host loop).
+- `test_ui.cjs`: **PASS** (`control-panel-v2` UI/MCP integration).
+- `git diff --check`: **PASS**.
+- Retest ChatGPT Web sau khi gỡ/cài lại plugin MCP Bridge local xác nhận nút `Bắt đầu quét` tự khởi động scan và workflow, không cần message thứ hai.
+
+### Khôi phục cache của ChatGPT Web
+
+Sau khi đổi tool hoặc UI resource, restart tunnel rồi vào Settings → Apps → Codex app → **Làm mới**. Nếu host vẫn hiển thị behavior cũ, gỡ và cài lại plugin MCP Bridge local, mở lại chat và `show_security_scan_panel`, rồi lặp lại kiểm tra nút `Bắt đầu quét`. Đây là quy trình làm mới cache plugin/host; không phải thay đổi flow hay kiến trúc MCP.

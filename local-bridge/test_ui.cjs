@@ -24,7 +24,7 @@ const { chromium } = require(process.env.PLAYWRIGHT_MODULE || path.join(process.
     const modern=(method,params={})=>rpc(method,{...params,_meta:modernMeta});
     const discovered=await modern('server/discover');assert.ok(discovered.supportedVersions.includes('2026-07-28'));assert.ok(discovered.capabilities.extensions['io.modelcontextprotocol/ui']);
     const mcpCall=async(name,args={})=>{const r=await modern('tools/call',{name,arguments:args});assert.ok(!r.isError,JSON.stringify(r.content));return r.structuredContent};
-    const schema=await modern('tools/list');assert.equal(schema.tools.length,27);
+    const schema=await modern('tools/list');assert.equal(schema.tools.length,36);
     const info=await mcpCall('project_info');assert.equal(info.workspace_root.replaceAll('\\','/'),project.replaceAll('\\','/'));
     const malicious='<img src=x onerror="window.PWNED=true">\r\nKhầy\r\n';
     const change=await mcpCall('prepare_changes',{title:'Kiểm thử UI',edits:[{path:'xin chao.txt',content:malicious}],request_id:'ui-test-prepare'});
@@ -50,14 +50,15 @@ const { chromium } = require(process.env.PLAYWRIGHT_MODULE || path.join(process.
       frame.srcdoc=html;
     },resource.contents[0].text);
     const frame=page.frameLocator('#app');
+    await frame.getByRole('button',{name:'Normal (An toàn)',exact:true}).waitFor();
+    await frame.getByRole('button',{name:'Turbo (Mở quyền)',exact:true}).waitFor();
+    await frame.getByRole('tab',{name:/Workspace & Sơ đồ/}).click();
     await frame.getByText(project.replaceAll('\\','/'),{exact:true}).waitFor();
-    await frame.getByRole('button',{name:'Normal',exact:true}).waitFor();
-    await frame.getByRole('button',{name:'Turbo',exact:true}).waitFor();
-    await frame.getByLabel('Chọn đợt',{exact:true}).selectOption(change.change_id);
+    await frame.getByRole('tab',{name:/Đợt sửa & Diff/}).click();
+    await frame.getByRole('combobox').first().selectOption(change.change_id);
     await frame.getByRole('button',{name:'Áp dụng đợt sửa',exact:true}).waitFor();
-    console.log('UI snapshot:',await frame.locator('body').innerText());
     await frame.getByRole('button',{name:'Áp dụng đợt sửa',exact:true}).click();
-    await frame.getByText(/Đã áp dụng ·/).waitFor();
+    await frame.getByText('Đã áp dụng',{exact:true}).waitFor();
     assert.equal(fs.readFileSync(path.join(project,'xin chao.txt'),'utf8'),malicious);
     const targetFrame=page.frames().find(f=>f.parentFrame());
     assert.equal(await targetFrame.evaluate(()=>window.PWNED),undefined);
@@ -65,10 +66,14 @@ const { chromium } = require(process.env.PLAYWRIGHT_MODULE || path.join(process.
     const output=path.resolve(__dirname,'../output/playwright');fs.mkdirSync(output,{recursive:true});
     await page.screenshot({path:path.join(output,'control-panel-applied.png'),fullPage:true});
     await frame.getByRole('button',{name:'Hoàn tác đợt sửa',exact:true}).click();
-    await frame.getByText(/Đã hoàn tác ·/).waitFor();
+    await frame.getByRole('button',{name:'Hoàn tác ngay',exact:true}).click();
+    await frame.getByText('Đã hoàn tác',{exact:true}).waitFor();
     assert.ok(!fs.existsSync(path.join(project,'xin chao.txt')));
-    assert.equal((await mcpCall('apply_changes',{change_id:change.change_id,request_id:`ui-apply_changes-${change.change_id}`})).status,'undone');
-    if(!info.runtime.commands_enabled)assert.ok(await frame.getByRole('button',{name:'Chạy',exact:true}).isDisabled());
+    assert.equal((await mcpCall('apply_changes',{change_id:change.change_id,request_id:`ui-apply-${change.change_id}`})).status,'undone');
+    if(!info.runtime.commands_enabled){
+      await frame.getByRole('tab',{name:/Task & Terminal/}).click();
+      assert.ok(await frame.getByRole('button',{name:'Chạy',exact:true}).isDisabled());
+    }
     assert.deepEqual(errors,[]);
     const evidence=JSON.stringify({ui:'PASS',stdio:'PASS',preview_apply_undo:'PASS',xss:'PASS',commands_enabled:info.runtime.commands_enabled,chatgpt_host:'NOT_TESTED',project},null,2);
     fs.writeFileSync(path.join(temp,'result.json'),evidence);

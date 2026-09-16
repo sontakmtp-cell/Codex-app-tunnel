@@ -6,13 +6,71 @@ from pathlib import Path
 import re
 import shutil
 import sys
+import time
 import uuid
 from urllib.parse import urlparse
 
 from files import (BridgeConfig, BridgeError, ChangeJournal, ProjectFiles, _bounded, _redact,
-                   _sha256, check_link_chain, git_repository, integer, load_config)
+                   _sha256, check_link_chain, git_repository, integer, load_config, request_key)
 from runtime import AppServer
 from tasks import TaskRunner
+
+
+_SECURITY_MODES = {"standard", "chatgpt_deep"}
+_SECURITY_TARGETS = {"codebase", "changes"}
+_SECURITY_TERMINAL = {"cancelled", "failed", "completed"}
+_SECURITY_STANDARD_PHASES = (
+    "preflight", "inventory", "threat_model", "discovery", "validation",
+    "attack_path", "finalization",
+)
+_SECURITY_DEEP_PHASES = (
+    "preflight", "inventory", "threat_model", "attack_surface",
+    "auth_data_flow", "injection_file_process_network_state", "deduplicate",
+    "validation", "attack_path", "finalization",
+)
+_SECURITY_PHASE_FIELDS = {
+    "preflight": {"coverage"},
+    "inventory": {"inventory", "coverage", "boundaries"},
+    "threat_model": {"threatModel", "coverage"},
+    "discovery": {"candidates", "coverage"},
+    "attack_surface": {"candidates", "coverage"},
+    "auth_data_flow": {"candidates", "coverage"},
+    "injection_file_process_network_state": {"candidates", "coverage"},
+    "deduplicate": {"candidates", "coverage"},
+    "validation": {"validations", "coverage"},
+    "attack_path": {"attackPaths", "coverage"},
+    "finalization": {"findings", "coverage"},
+}
+_SECURITY_FORMATS = {"json", "sarif", "markdown"}
+_SECURITY_SENSITIVE_KEYS = {
+    "scandir", "scan_dir", "workspace_root", "root", "state_dir", "handofftoken",
+    "handoff_token", "resumetoken", "resume_token", "sandbox", "secret", "secrets",
+    "token", "password", "authorization", "credential", "env", "environment",
+}
+
+
+def _security_scan_key(value):
+    if not isinstance(value, str) or not 1 <= len(value) <= 128 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", value):
+        raise BridgeError("INVALID_INPUT: invalid scan_id.")
+    return value
+
+
+def _security_status(value, fallback="running"):
+    if not isinstance(value, str) or not value.strip():
+        return fallback
+    value = value.strip().lower().replace("-", "_")
+    return {"complete": "completed", "canceled": "cancelled"}.get(value, value)
+
+
+def _security_redact_text(value):
+    value = _redact(str(value))
+    # Keep safe project-relative filenames while hiding absolute locations.
+    return re.sub(r"(?i)(?:[A-Za-z]:[\\/]|(?<![A-Za-z0-9])//|(?<![A-Za-z0-9])/(?!\s))[^\s,;}\]]+",
+                  "[REDACTED_PATH]", value)
+
+
+def datetime_now():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
 def _git_bash_executable():
@@ -31,8 +89,38 @@ def _git_bash_executable():
 
 
 class LocalBridge(ChangeJournal):
-    def __init__(self, config, runtime=None, start_runtime=True):
+    """Local facade plus a deliberately small direct Security adapter contract.
+
+    ``security_adapter`` is expected to expose only these direct methods:
+    ``start_scan(mode, target, user_context, request_id)`` returning a
+    ``workspace.results.scanId`` response; ``get_scan(scan_id)``;
+    ``continue_scan(scan_id)``; ``commit_phase(scan_id, phase, phase_data,
+    request_id)``; ``complete_scan(scan_id, request_id)``;
+    ``cancel_scan(scan_id, request_id)``; ``list_findings(scan_id, cursor,
+    limit)``; and ``export_findings(scan_id, format)``.  It may also expose
+    ``find_scan_by_request(request_id, payload_hash)`` and
+    ``show_security_scan_panel()``.  These calls are direct Security MCP
+    adapter calls: no App Server turn, model, reasoning setting or native
+    worker is part of this contract.  A repeated ``start_scan`` with the same
+    request and payload must replay the adapter journal instead of creating a
+    second native scan.
+    """
+
+    def __init__(self, config, runtime=None, start_runtime=True, security_adapter=None, adapter=None):
+        # Keep the old third positional ``start_runtime`` argument usable while
+        # accepting a convenient positional adapter for the new facade tests.
+        if security_adapter is None and adapter is not None:
+            security_adapter = adapter
+        if (security_adapter is None and runtime is not None and
+                not hasattr(runtime, "listeners") and callable(getattr(runtime, "start_scan", None))):
+            security_adapter, runtime = runtime, None
+        if security_adapter is None and not isinstance(start_runtime, bool):
+            security_adapter, start_runtime = start_runtime, True
         super().__init__(config)
+        if security_adapter is None:
+            security_adapter = getattr(runtime, "security_adapter", None)
+        self.security_adapter = security_adapter
+        self._init_security_journal()
         runtime_roots = [Path(sys.base_prefix), Path(sys.prefix), *config.runtime_read_roots]
         for exe in ("rg", "git"):
             resolved = shutil.which(exe)
@@ -60,6 +148,14 @@ class LocalBridge(ChangeJournal):
         run_id = self.active_run
         if run_id:
             self.tasks.stop_task_run(run_id, "shutdown-"+uuid.uuid4().hex)
+        adapter = self.security_adapter
+        if adapter is not None:
+            shutdown = getattr(adapter, "shutdown", None)
+            close = getattr(adapter, "close", None)
+            if callable(shutdown):
+                shutdown()
+            elif callable(close):
+                close()
         self.runtime.close()
         if run_id and not self.tasks.runs[run_id]["done"].wait(12):
             raise BridgeError("SHUTDOWN_TIMEOUT: journal remains locked until the bridge process exits.")
@@ -367,6 +463,705 @@ class LocalBridge(ChangeJournal):
                 raise BridgeError("INVALID_INPUT: invalid anchor.")
             args["anchor"] = anchor
         return {"result": self._docs("fetch_openai_doc",args)}
+
+    def _init_security_journal(self):
+        # Reuse ChangeJournal's WAL/lock: this is the durable bridge-journal
+        # for Security request idempotency and checkpoints.
+        with self.db:
+            self.db.execute("""
+                CREATE TABLE IF NOT EXISTS security_requests (
+                    request_id TEXT PRIMARY KEY,
+                    operation TEXT NOT NULL,
+                    payload_hash TEXT NOT NULL,
+                    scan_id TEXT,
+                    status TEXT NOT NULL,
+                    review_mode TEXT,
+                    target TEXT,
+                    phase TEXT,
+                    created REAL NOT NULL,
+                    updated REAL NOT NULL
+                )
+            """)
+            self.db.execute("""
+                CREATE TABLE IF NOT EXISTS security_scans (
+                    scan_id TEXT PRIMARY KEY,
+                    review_mode TEXT,
+                    target TEXT,
+                    status TEXT NOT NULL,
+                    phase TEXT NOT NULL,
+                    created REAL NOT NULL,
+                    updated REAL NOT NULL
+                )
+            """)
+            self.db.execute("""
+                CREATE TABLE IF NOT EXISTS security_checkpoints (
+                    scan_id TEXT NOT NULL,
+                    phase TEXT NOT NULL,
+                    request_id TEXT NOT NULL,
+                    payload_hash TEXT NOT NULL,
+                    created REAL NOT NULL,
+                    PRIMARY KEY(scan_id, phase)
+                )
+            """)
+
+    @staticmethod
+    def _security_hash(value):
+        try:
+            encoded = json.dumps(value, sort_keys=True, separators=(",", ":"),
+                                 ensure_ascii=False, allow_nan=False).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise BridgeError("INVALID_INPUT: Security payload must be JSON data.") from exc
+        if len(encoded) > 2 * 1024 * 1024:
+            raise BridgeError("INVALID_INPUT: Security payload is too large.")
+        return _sha256(encoded)
+
+    @staticmethod
+    def _security_status_from_scan(scan, fallback="running"):
+        if not isinstance(scan, dict):
+            return fallback
+        return _security_status(scan.get("status") or scan.get("state"), fallback)
+
+    @staticmethod
+    def _security_phase_from_scan(scan, fallback="preflight"):
+        if not isinstance(scan, dict):
+            return fallback
+        return scan.get("currentPhase") or scan.get("current_phase") or scan.get("phase") or fallback
+
+    @staticmethod
+    def _security_scan_from_response(response):
+        if not isinstance(response, dict):
+            native = getattr(response, "native_result", None)
+            response = native if isinstance(native, dict) else None
+        if not isinstance(response, dict):
+            raise BridgeError("SECURITY_ADAPTER_INVALID: adapter returned a non-object response.")
+        pending, seen = [response], set()
+        values = []
+        while pending:
+            value = pending.pop(0)
+            if not isinstance(value, dict) or id(value) in seen:
+                continue
+            seen.add(id(value))
+            values.append(value)
+            for key in ("structuredContent", "result", "data", "workspace", "results", "scan", "state"):
+                child = value.get(key)
+                if isinstance(child, dict):
+                    pending.append(child)
+        for value in values:
+            scan = value.get("scan")
+            if isinstance(scan, dict):
+                return scan
+        for value in values:
+            if any(key in value for key in ("status", "state", "phase", "currentPhase", "current_phase")):
+                return value
+        return response
+
+    @staticmethod
+    def _security_start_scan_id(response):
+        if not isinstance(response, dict):
+            native = getattr(response, "native_result", None)
+            response = native if isinstance(native, dict) else None
+        pending, seen = ([response] if isinstance(response, dict) else []), set()
+        while pending:
+            value = pending.pop(0)
+            if not isinstance(value, dict) or id(value) in seen:
+                continue
+            seen.add(id(value))
+            workspace = value.get("workspace")
+            results = workspace.get("results") if isinstance(workspace, dict) else None
+            scan_id = results.get("scanId") if isinstance(results, dict) else None
+            if isinstance(scan_id, str):
+                return _security_scan_key(scan_id)
+            for key in ("structuredContent", "result", "data", "workspace"):
+                child = value.get(key)
+                if isinstance(child, dict):
+                    pending.append(child)
+        raise BridgeError("SECURITY_START_FAILED: adapter response has no workspace.results.scanId.")
+
+    @staticmethod
+    def _security_find_scan_id(response):
+        if not isinstance(response, dict):
+            return None
+        try:
+            return LocalBridge._security_start_scan_id(response)
+        except BridgeError:
+            scan_id = response.get("scanId") or response.get("scan_id")
+            if isinstance(scan_id, str):
+                try:
+                    return _security_scan_key(scan_id)
+                except BridgeError:
+                    return None
+        return None
+
+    def _security_adapter_method(self, name, optional=False):
+        if self.security_adapter is None and not optional:
+            self._ensure_security_adapter()
+        method = getattr(self.security_adapter, name, None) if self.security_adapter is not None else None
+        if callable(method):
+            return method
+        if optional:
+            return None
+        raise BridgeError("SECURITY_ADAPTER_UNAVAILABLE: direct Security adapter is not configured.")
+
+    def _ensure_security_adapter(self):
+        if self.security_adapter is not None:
+            return self.security_adapter
+        try:
+            from security_mcp import SecurityMcpAdapter
+            self.security_adapter = SecurityMcpAdapter(self.state, self.root).start()
+        except Exception as exc:
+            raise BridgeError("SECURITY_ADAPTER_UNAVAILABLE: direct Security MCP is not ready.") from exc
+        return self.security_adapter
+
+    def _security_call(self, name, *args):
+        method = self._security_adapter_method(name)
+        try:
+            return method(*args)
+        except BridgeError:
+            raise
+        except Exception as exc:
+            # Adapter internals can contain paths/tokens; never reflect them.
+            raise BridgeError("SECURITY_ADAPTER_FAILED: direct Security operation failed.") from exc
+
+    def _security_optional_call(self, name, *args):
+        method = self._security_adapter_method(name, optional=True)
+        if method is None:
+            return None
+        try:
+            return method(*args)
+        except BridgeError:
+            raise
+        except Exception as exc:
+            raise BridgeError("SECURITY_ADAPTER_FAILED: direct Security operation failed.") from exc
+
+    def _security_validate_start(self, review_mode, target, user_context, request_id):
+        if review_mode not in _SECURITY_MODES:
+            raise BridgeError("INVALID_INPUT: review_mode must be standard or chatgpt_deep.")
+        if target not in _SECURITY_TARGETS:
+            raise BridgeError("INVALID_INPUT: target must be codebase or changes.")
+        if target == "changes" and not git_repository(self.root):
+            raise BridgeError("UNSUPPORTED_TARGET: changes requires a Git repository.")
+        if user_context is not None and (not isinstance(user_context, str) or len(user_context) > 4000 or "\x00" in user_context):
+            raise BridgeError("INVALID_INPUT: user_context must be at most 4000 characters without NUL bytes.")
+        request_key(request_id)
+        return user_context
+
+    @staticmethod
+    def _security_native_target(target):
+        return {"kind": "working_tree"} if target == "changes" else {"kind": "codebase"}
+
+    @staticmethod
+    def _security_sequence(review_mode):
+        if review_mode == "standard":
+            return _SECURITY_STANDARD_PHASES
+        if review_mode == "chatgpt_deep":
+            return _SECURITY_DEEP_PHASES
+        raise BridgeError("SECURITY_STATE_INVALID: unknown review mode.")
+
+    @classmethod
+    def _security_next_phase(cls, review_mode, phase):
+        phases = cls._security_sequence(review_mode)
+        if phase == "complete":
+            return None
+        try:
+            index = phases.index(phase)
+        except ValueError as exc:
+            raise BridgeError("SECURITY_STATE_INVALID: unknown workflow phase.") from exc
+        return phases[index + 1] if index + 1 < len(phases) else "complete"
+
+    def _security_public_value(self, value, key=""):
+        if isinstance(value, dict):
+            safe = {}
+            for raw_key, raw_value in value.items():
+                name = str(raw_key)
+                lowered = name.casefold().replace("-", "_")
+                if (lowered in _SECURITY_SENSITIVE_KEYS or "token" in lowered or "secret" in lowered or
+                        "password" in lowered or "credential" in lowered or "path" in lowered or
+                        lowered in {"cwd", "directory", "dir"}):
+                    continue
+                safe[name] = self._security_public_value(raw_value, name)
+            return safe
+        if isinstance(value, list):
+            return [self._security_public_value(item, key) for item in value[:200]]
+        if isinstance(value, tuple):
+            return [self._security_public_value(item, key) for item in value[:200]]
+        if isinstance(value, str):
+            return _security_redact_text(value)[:20000]
+        if value is None or isinstance(value, (bool, int, float)):
+            return value
+        return _security_redact_text(value)[:20000]
+
+    def _security_scan_record(self, scan_id):
+        return self.db.execute("SELECT * FROM security_scans WHERE scan_id=?", (scan_id,)).fetchone()
+
+    def _security_request_record(self, request_id):
+        return self.db.execute("SELECT * FROM security_requests WHERE request_id=?", (request_id,)).fetchone()
+
+    def _security_start_record_for_scan(self, scan_id):
+        return self.db.execute(
+            "SELECT * FROM security_requests WHERE operation='start' AND scan_id=? ORDER BY created LIMIT 1",
+            (scan_id,)).fetchone()
+
+    def _security_save_scan(self, scan_id, review_mode, target, status, phase):
+        now = time.time()
+        status = _security_status(status)
+        if not isinstance(phase, str) or not phase:
+            phase = "complete" if status == "completed" else "preflight"
+        with self.db:
+            old = self._security_scan_record(scan_id)
+            if old:
+                self.db.execute("""UPDATE security_scans
+                    SET review_mode=?, target=?, status=?, phase=?, updated=? WHERE scan_id=?""",
+                    (review_mode or old["review_mode"], target or old["target"], status, phase, now, scan_id))
+            else:
+                self.db.execute("""INSERT INTO security_scans
+                    (scan_id,review_mode,target,status,phase,created,updated)
+                    VALUES (?,?,?,?,?,?,?)""",
+                    (scan_id, review_mode, target, status, phase, now, now))
+            self.db.execute("""UPDATE security_requests
+                SET scan_id=COALESCE(?,scan_id), status=?, phase=?, updated=?
+                WHERE operation='start' AND scan_id=?""", (scan_id, status, phase, now, scan_id))
+
+    def _security_finish_request(self, request_id, status, scan_id=None, phase=None):
+        with self.db:
+            self.db.execute("""UPDATE security_requests
+                SET scan_id=COALESCE(?,scan_id), status=?, phase=COALESCE(?,phase), updated=?
+                WHERE request_id=?""", (scan_id, status, phase, time.time(), request_id))
+
+    def _security_save_checkpoint(self, scan_id, phase, request_id, payload_hash):
+        with self.db:
+            self.db.execute(
+                "INSERT OR REPLACE INTO security_checkpoints"
+                "(scan_id,phase,request_id,payload_hash,created) VALUES (?,?,?,?,?)",
+                (scan_id, phase, request_id, payload_hash, time.time()),
+            )
+
+    def _security_view(self, scan_id, raw_scan=None, fallback=None):
+        scan = self._security_scan_from_response(raw_scan or {})
+        fallback = fallback or self._security_scan_record(scan_id) or self._security_start_record_for_scan(scan_id)
+        status = self._security_status_from_scan(scan, fallback["status"] if fallback else "running")
+        review_mode = (scan.get("reviewMode") or scan.get("review_mode") if isinstance(scan, dict) else None)
+        target = scan.get("target") if isinstance(scan, dict) else None
+        if fallback:
+            review_mode = review_mode or fallback["review_mode"]
+            target = target or fallback["target"]
+        if review_mode not in _SECURITY_MODES:
+            review_mode = None
+        if target not in _SECURITY_TARGETS:
+            target = None
+        phase = self._security_phase_from_scan(scan, fallback["phase"] if fallback else "preflight")
+        if status == "completed":
+            phase = "complete"
+        elif not isinstance(phase, str):
+            raise BridgeError("SECURITY_STATE_INVALID: adapter returned an invalid phase.")
+        result = {
+            "scanId": scan_id,
+            "reviewMode": review_mode,
+            "target": target,
+            "status": status,
+            "phase": phase,
+            "currentPhase": phase,
+            "nextPhase": None if status in _SECURITY_TERMINAL else self._security_next_phase(review_mode, phase),
+            "updatedAt": (scan.get("updatedAt") or scan.get("updated_at")
+                          if isinstance(scan, dict) else None) or datetime_now(),
+        }
+        if isinstance(scan, dict):
+            coverage = scan.get("coverageSoFar", scan.get("coverage_so_far", scan.get("coverage")))
+            counts = scan.get("findingCounts", scan.get("finding_counts"))
+            if coverage is not None:
+                result["coverageSoFar"] = self._security_public_value(coverage)
+            if isinstance(counts, dict):
+                result["findingCounts"] = self._security_public_value(counts)
+        result["phaseInstructions"] = self._security_phase_instructions(phase)
+        return result
+
+    @staticmethod
+    def _security_phase_instructions(phase):
+        instructions = {
+            "preflight": "Confirm the fixed project and review scope, then commit preflight.",
+            "inventory": "Inventory entry points and security boundaries, then commit inventory.",
+            "threat_model": "Record source-backed trust boundaries and threats, then commit the threat model.",
+            "discovery": "Run one source-backed discovery pass and commit candidates plus coverage.",
+            "attack_surface": "Review attack surface, entry points and trust boundaries, then commit candidates.",
+            "auth_data_flow": "Review auth, authorization, secrets and data flow, then commit candidates.",
+            "injection_file_process_network_state": "Review injection, file, process, network, unsafe execution and state handling, then commit candidates.",
+            "deduplicate": "Deduplicate and merge candidates before validation, then commit the result.",
+            "validation": "Validate candidates against source evidence, then commit validations.",
+            "attack_path": "Analyze attack paths for validated findings, then commit attack paths.",
+            "finalization": "Record final findings and coverage, then complete the scan.",
+            "complete": "The scan is complete.",
+        }
+        return instructions.get(phase, "Follow the returned workflow phase and commit its checkpoint.")
+
+    def _security_authoritative(self, scan_id, fallback=None, advance=False):
+        if advance:
+            method = self._security_adapter_method("continue_scan", optional=True)
+            raw = self._security_call("continue_scan", scan_id) if method else self._security_call("get_scan", scan_id)
+        else:
+            raw = self._security_call("get_scan", scan_id)
+        scan = self._security_scan_from_response(raw)
+        view = self._security_view(scan_id, scan, fallback)
+        self._security_save_scan(scan_id, view["reviewMode"], view["target"], view["status"], view["phase"])
+        return view, scan
+
+    def _security_active_scan(self):
+        rows = self.db.execute("SELECT * FROM security_scans ORDER BY created DESC").fetchall()
+        for row in rows:
+            if row["status"] in _SECURITY_TERMINAL:
+                continue
+            if not row["scan_id"]:
+                return row
+            try:
+                view, _ = self._security_authoritative(row["scan_id"], row)
+            except BridgeError:
+                # Unknown adapter state is unsafe to treat as free capacity.
+                return row
+            if view["status"] not in _SECURITY_TERMINAL:
+                return view
+        return None
+
+    def _security_check_request(self, request_id, operation, payload_hash, scan_id=None):
+        old = self._security_request_record(request_id)
+        if not old:
+            return None
+        if old["operation"] != operation or old["payload_hash"] != payload_hash or (
+                scan_id is not None and old["scan_id"] not in (None, scan_id)):
+            raise BridgeError("IDEMPOTENCY_CONFLICT: request_id already describes another Security operation.")
+        return old
+
+    def _security_insert_request(self, request_id, operation, payload_hash, scan_id=None,
+                                 status="pending", review_mode=None, target=None, phase=None):
+        now = time.time()
+        with self.db:
+            self.db.execute("""INSERT INTO security_requests
+                (request_id,operation,payload_hash,scan_id,status,review_mode,target,phase,created,updated)
+                VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (request_id, operation, payload_hash, scan_id, status, review_mode, target, phase, now, now))
+
+    def _security_mutation_payload(self, operation, scan_id, phase=None, phase_data=None):
+        return {"operation": operation, "scan_id": scan_id, "phase": phase, "phase_data": phase_data}
+
+    def _security_phase_payload(self, phase, phase_data, fields):
+        if phase_data is None:
+            phase_data = {}
+        if not isinstance(phase_data, dict):
+            raise BridgeError("INVALID_INPUT: phase data must be an object.")
+        data = dict(phase_data)
+        aliases = {"threat_model": "threatModel", "attack_paths": "attackPaths",
+                   "candidate_validations": "validations"}
+        for key, value in fields.items():
+            mapped = aliases.get(key, key)
+            if mapped in data:
+                raise BridgeError("INVALID_INPUT: duplicate phase field.")
+            data[mapped] = value
+        if "payload" in data:
+            raise BridgeError("INVALID_INPUT: phase-specific fields are required; payload is not accepted.")
+        allowed = _SECURITY_PHASE_FIELDS.get(phase)
+        if allowed is None:
+            raise BridgeError("INVALID_INPUT: unknown workflow phase.")
+        unknown = set(data) - allowed
+        if unknown:
+            raise BridgeError("INVALID_INPUT: phase fields do not match the current workflow phase.")
+        self._security_hash(data)
+        return data
+
+    def security_start_scan(self, review_mode, target, user_context=None, request_id=None):
+        user_context = self._security_validate_start(review_mode, target, user_context, request_id)
+        payload = {"review_mode": review_mode, "target": target, "user_context": user_context}
+        payload_hash = self._security_hash(payload)
+        native_mode = "diff" if target == "changes" else "standard"
+        native_target = self._security_native_target(target)
+        with self.lock:
+            old = self._security_check_request(request_id, "start", payload_hash)
+            if old:
+                if old["scan_id"]:
+                    view, _ = self._security_authoritative(old["scan_id"], old)
+                    return {key: view[key] for key in
+                            ("scanId", "reviewMode", "target", "status", "phase", "nextPhase", "updatedAt")}
+                found = self._security_optional_call("find_scan_by_request", request_id, payload_hash)
+                scan_id = self._security_find_scan_id(found)
+                if not scan_id:
+                    # A pending row means the previous process may have died
+                    # between the adapter side effect and our journal commit.
+                    # Retry the exact request; the direct adapter owns the
+                    # native idempotency journal and must replay its scan.
+                    response = self._security_call(
+                        "start_scan", native_mode, native_target, user_context, request_id)
+                    scan_id = self._security_start_scan_id(response)
+                self._security_save_scan(scan_id, review_mode, target, "running", "preflight")
+                self._security_finish_request(request_id, "running", scan_id, "preflight")
+                view, _ = self._security_authoritative(scan_id, self._security_scan_record(scan_id))
+                return {key: view[key] for key in
+                        ("scanId", "reviewMode", "target", "status", "phase", "nextPhase", "updatedAt")}
+
+            active = self._security_active_scan()
+            if active:
+                raise BridgeError("SECURITY_SCAN_ACTIVE: continue the active scan before creating another scan.")
+            self._security_insert_request(request_id, "start", payload_hash, status="pending",
+                                          review_mode=review_mode, target=target, phase="preflight")
+            # No model/reasoning argument is intentionally present here.
+            response = self._security_call("start_scan", native_mode, native_target, user_context, request_id)
+            scan_id = self._security_start_scan_id(response)
+            self._security_save_scan(scan_id, review_mode, target, "running", "preflight")
+            self._security_finish_request(request_id, "running", scan_id, "preflight")
+            return {
+                "scanId": scan_id,
+                "reviewMode": review_mode,
+                "target": target,
+                "status": "running",
+                "phase": "preflight",
+                "nextPhase": "inventory",
+                "updatedAt": datetime_now(),
+            }
+
+    def security_get_scan(self, scan_id):
+        scan_id = _security_scan_key(scan_id)
+        with self.lock:
+            fallback = self._security_scan_record(scan_id) or self._security_start_record_for_scan(scan_id)
+            view, _ = self._security_authoritative(scan_id, fallback)
+            return view
+
+    def security_continue_scan(self, scan_id):
+        scan_id = _security_scan_key(scan_id)
+        with self.lock:
+            fallback = self._security_scan_record(scan_id) or self._security_start_record_for_scan(scan_id)
+            view, _ = self._security_authoritative(scan_id, fallback, advance=True)
+            return view
+
+    def security_commit_phase(self, scan_id, phase, phase_data=None, request_id=None, **fields):
+        scan_id = _security_scan_key(scan_id)
+        if request_id is None and isinstance(phase_data, str):
+            request_id, phase_data = phase_data, None
+        request_key(request_id)
+        if not isinstance(phase, str) or not re.fullmatch(r"[a-z][a-z0-9_]{1,79}", phase):
+            raise BridgeError("INVALID_INPUT: invalid workflow phase.")
+        data = self._security_phase_payload(phase, phase_data, fields)
+        payload_hash = self._security_hash(self._security_mutation_payload("commit", scan_id, phase, data))
+        with self.lock:
+            old = self._security_check_request(request_id, "commit", payload_hash, scan_id)
+            if old and old["status"] == "done":
+                return self.security_get_scan(scan_id)
+            fallback = self._security_scan_record(scan_id) or self._security_start_record_for_scan(scan_id)
+            current, _ = self._security_authoritative(scan_id, fallback)
+            if old and current["status"] in _SECURITY_TERMINAL:
+                raise BridgeError("SECURITY_TERMINAL: scan is terminal; no mutation is allowed.")
+            if old and current["phase"] != phase:
+                expected = self._security_next_phase(current["reviewMode"], phase)
+                if current["phase"] == expected:
+                    self._security_finish_request(request_id, "done", scan_id, current["phase"])
+                    return current
+                raise BridgeError("SECURITY_PHASE_ORDER: pending checkpoint did not complete at the expected phase.")
+            if current["status"] in _SECURITY_TERMINAL:
+                raise BridgeError("SECURITY_TERMINAL: scan is terminal; no mutation is allowed.")
+            if current["reviewMode"] not in _SECURITY_MODES:
+                raise BridgeError("SECURITY_STATE_INVALID: scan has no supported review mode.")
+            if current["phase"] != phase:
+                raise BridgeError("SECURITY_PHASE_ORDER: phase does not match the authoritative current phase.")
+            next_phase = self._security_next_phase(current["reviewMode"], phase)
+            if not old:
+                self._security_insert_request(request_id, "commit", payload_hash, scan_id, phase=phase)
+            response = self._security_call("commit_phase", scan_id, phase, data, request_id)
+            returned = self._security_scan_from_response(response or {})
+            returned_phase = self._security_phase_from_scan(returned, next_phase)
+            if returned_phase not in {phase, next_phase}:
+                raise BridgeError("SECURITY_PHASE_ORDER: adapter advanced to an unexpected phase.")
+            status = self._security_status_from_scan(returned, current["status"])
+            checkpoint_phase = phase if next_phase == "complete" else next_phase
+            self._security_save_scan(scan_id, current["reviewMode"], current["target"], status, checkpoint_phase)
+            self._security_save_checkpoint(scan_id, phase, request_id, payload_hash)
+            self._security_finish_request(request_id, "done", scan_id, checkpoint_phase)
+            return self._security_view(scan_id, {"status": status, "phase": checkpoint_phase},
+                                       self._security_scan_record(scan_id))
+
+    def security_complete_scan(self, scan_id, request_id):
+        scan_id = _security_scan_key(scan_id)
+        request_key(request_id)
+        payload_hash = self._security_hash(self._security_mutation_payload("complete", scan_id))
+        with self.lock:
+            old = self._security_check_request(request_id, "complete", payload_hash, scan_id)
+            fallback = self._security_scan_record(scan_id) or self._security_start_record_for_scan(scan_id)
+            current, _ = self._security_authoritative(scan_id, fallback)
+            if old and old["status"] == "done":
+                return current
+            if old and current["status"] == "completed":
+                self._security_finish_request(request_id, "done", scan_id, "complete")
+                return current
+            if current["status"] in _SECURITY_TERMINAL:
+                raise BridgeError("SECURITY_TERMINAL: scan is terminal; no mutation is allowed.")
+            if current["phase"] != "finalization":
+                raise BridgeError("SECURITY_PHASE_ORDER: complete requires the finalization checkpoint.")
+            if not old:
+                self._security_insert_request(request_id, "complete", payload_hash, scan_id, phase="finalization")
+            response = self._security_call("complete_scan", scan_id, request_id)
+            returned = self._security_scan_from_response(response or {})
+            status = self._security_status_from_scan(returned, "completed")
+            if status not in {"completed", "failed"}:
+                raise BridgeError("SECURITY_COMPLETE_FAILED: adapter did not return a terminal result.")
+            phase = "complete" if status == "completed" else "finalization"
+            self._security_save_scan(scan_id, current["reviewMode"], current["target"], status, phase)
+            self._security_finish_request(request_id, "done", scan_id, phase)
+            return self._security_view(scan_id, {"status": status, "phase": phase},
+                                       self._security_scan_record(scan_id))
+
+    def security_cancel_scan(self, scan_id, request_id):
+        scan_id = _security_scan_key(scan_id)
+        request_key(request_id)
+        payload_hash = self._security_hash(self._security_mutation_payload("cancel", scan_id))
+        with self.lock:
+            old = self._security_check_request(request_id, "cancel", payload_hash, scan_id)
+            fallback = self._security_scan_record(scan_id) or self._security_start_record_for_scan(scan_id)
+            current, _ = self._security_authoritative(scan_id, fallback)
+            if old and old["status"] == "done":
+                return current
+            if old and current["status"] == "cancelled":
+                self._security_finish_request(request_id, "done", scan_id, current["phase"])
+                return current
+            if current["status"] in _SECURITY_TERMINAL:
+                raise BridgeError("SECURITY_TERMINAL: scan is terminal; no mutation is allowed.")
+            if not old:
+                self._security_insert_request(request_id, "cancel", payload_hash, scan_id, phase=current["phase"])
+            response = self._security_call("cancel_scan", scan_id, request_id)
+            returned = self._security_scan_from_response(response or {})
+            status = self._security_status_from_scan(returned, "cancelled")
+            if status != "cancelled":
+                raise BridgeError("SECURITY_CANCEL_FAILED: adapter did not confirm cancellation.")
+            phase = self._security_phase_from_scan(returned, current["phase"])
+            self._security_save_scan(scan_id, current["reviewMode"], current["target"], status, phase)
+            self._security_finish_request(request_id, "done", scan_id, phase)
+            return self._security_view(scan_id, {"status": status, "phase": phase},
+                                       self._security_scan_record(scan_id))
+
+    def _security_public_file(self, value):
+        if not isinstance(value, str) or not value:
+            return None
+        normalized = value.replace("\\", "/")
+        if re.match(r"^(?:[A-Za-z]:/|/|//)", normalized):
+            try:
+                candidate = Path(value).resolve()
+                relative = candidate.relative_to(self.root)
+                normalized = relative.as_posix()
+            except (OSError, ValueError):
+                return None
+        if any(part in {"", ".", ".."} for part in normalized.split("/")):
+            return None
+        # It is already a validated project-relative path; redacting the slash
+        # here would turn a safe file name into unusable evidence.
+        return normalized[:1000]
+
+    def _security_public_findings(self, findings):
+        if not isinstance(findings, list):
+            return []
+        allowed = {"id", "title", "severity", "description", "confidence", "status", "line",
+                   "startLine", "endLine", "rule", "cwe", "owasp", "file"}
+        result = []
+        for finding in findings[:200]:
+            if not isinstance(finding, dict):
+                continue
+            item = {}
+            for key in allowed:
+                if key not in finding:
+                    continue
+                if key == "file":
+                    file_name = self._security_public_file(finding[key])
+                    if file_name:
+                        item[key] = file_name
+                    continue
+                item[key] = self._security_public_value(finding[key], key)
+            if item:
+                result.append(item)
+        return result
+
+    def security_list_findings(self, scan_id, cursor=None, limit=50):
+        scan_id = _security_scan_key(scan_id)
+        integer(limit, "limit", 1, 200)
+        if cursor is not None and (not isinstance(cursor, (str, int)) or isinstance(cursor, bool) or
+                                   (isinstance(cursor, str) and len(cursor) > 2000) or
+                                   (isinstance(cursor, int) and not 0 <= cursor <= 100000)):
+            raise BridgeError("INVALID_INPUT: invalid findings cursor.")
+        with self.lock:
+            response = self._security_call("list_findings", scan_id, cursor, limit)
+            if isinstance(response, list):
+                findings, next_cursor, total = response, None, None
+            elif isinstance(response, dict):
+                page = response
+                for container in (response.get("structuredContent"), response.get("result"), response.get("data")):
+                    if not isinstance(container, dict):
+                        continue
+                    candidate = container.get("findingsPage", container)
+                    if isinstance(candidate, dict) and ("findings" in candidate or "items" in candidate):
+                        page = candidate
+                        break
+                findings = page.get("findings") or page.get("items") or []
+                next_cursor = page.get("nextCursor", page.get("next_cursor", page.get("nextOffset")))
+                total = page.get("total")
+            else:
+                raise BridgeError("SECURITY_ADAPTER_INVALID: findings response is not an object.")
+            result = {"scanId": scan_id, "findings": self._security_public_findings(findings),
+                      "nextCursor": self._security_public_value(next_cursor)}
+            if isinstance(total, int) and not isinstance(total, bool):
+                result["total"] = total
+            return result
+
+    def security_export_findings(self, scan_id, format):
+        scan_id = _security_scan_key(scan_id)
+        if not isinstance(format, str) or format.casefold() not in _SECURITY_FORMATS:
+            raise BridgeError("INVALID_INPUT: format must be json, sarif or markdown.")
+        format = format.casefold()
+        with self.lock:
+            response = self._security_call("export_findings", scan_id, format)
+            if isinstance(response, str):
+                try:
+                    export = self._security_public_value(json.loads(response))
+                except (TypeError, ValueError):
+                    export = re.sub(r"(?i)(token|secret|password)=?[^\s,;}]+", r"\1=[REDACTED]",
+                                    _security_redact_text(response))[:200000]
+            else:
+                export = self._security_public_value(response)
+            return {"scanId": scan_id, "format": format, "data": export}
+
+    def show_security_scan_panel(self):
+        with self.lock:
+            panel = self._security_optional_call("show_security_scan_panel")
+            repo = {"name": self.root.name, "gitRepository": git_repository(self.root)}
+            active = latest = None
+            if isinstance(panel, dict):
+                raw_repo = panel.get("repo") or panel.get("repository")
+                if isinstance(raw_repo, dict):
+                    for key in ("name", "branch", "commit", "gitRepository"):
+                        value = raw_repo.get(key)
+                        if value is not None:
+                            repo[key] = self._security_public_value(value)
+                active = panel.get("activeScan") or panel.get("active_scan")
+                latest = panel.get("latestScan") or panel.get("latest_scan")
+            rows = self.db.execute("SELECT * FROM security_scans ORDER BY updated DESC").fetchall()
+            if active is None:
+                active_row = next((row for row in rows if row["status"] not in _SECURITY_TERMINAL), None)
+                if active_row:
+                    try:
+                        active, _ = self._security_authoritative(active_row["scan_id"], active_row)
+                    except BridgeError:
+                        active = self._security_view(active_row["scan_id"], {}, active_row)
+            if latest is None and rows:
+                row = rows[0]
+                try:
+                    latest, _ = self._security_authoritative(row["scan_id"], row)
+                except BridgeError:
+                    latest = self._security_view(row["scan_id"], {}, row)
+            if isinstance(active, dict):
+                active_id = self._security_find_scan_id(active) or active.get("scanId")
+                active = self._security_view(_security_scan_key(active_id), active,
+                                             self._security_scan_record(active_id)) if active_id else None
+            if isinstance(latest, dict):
+                latest_id = self._security_find_scan_id(latest) or latest.get("scanId")
+                latest = self._security_view(_security_scan_key(latest_id), latest,
+                                             self._security_scan_record(latest_id)) if latest_id else None
+            return {
+                "panel": "security-scan-v1",
+                "repository": repo,
+                "supportedTargets": ["codebase", "changes"] if repo["gitRepository"] else ["codebase"],
+                "supportedReviewModes": ["standard", "chatgpt_deep"],
+                "activeScan": active,
+                "latestScan": latest,
+            }
 
     def show_control_panel(self):
         return {"panel_available":True, "project":self.project_info(),

@@ -90,6 +90,7 @@ $mcpCommand = "'$uvArg' run --with mcp==2.2.0 --python 3.13 '$bridgeArg' --confi
 $bridgeSources = @(
     Get-ChildItem -LiteralPath (Join-Path $root 'local-bridge') -Filter '*.py' -File
     Get-Item -LiteralPath (Join-Path $root 'local-bridge\panel.html')
+    Get-Item -LiteralPath (Join-Path $root 'local-bridge\security_scan_panel.html')
 )
 $bridgeFingerprint = $bridgeSources |
     Sort-Object FullName |

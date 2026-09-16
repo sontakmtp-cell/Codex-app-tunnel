@@ -1,0 +1,255 @@
+"""Focused tests for the V1 Security facade contract."""
+import json
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import patch
+
+from bridge import LocalBridge
+from files import BridgeConfig, BridgeError
+
+
+class RuntimeStub:
+    def __init__(self):
+        self.listeners = []
+        self.status = "connected"
+        self.version = "security-test-peer"
+        self.error = None
+        self.command_error = ""
+        self.execution_mode = "normal"
+        self.calls = []
+
+    @property
+    def can_execute(self):
+        return True
+
+    def close(self):
+        self.status = "stopped"
+
+
+class DirectSecurityAdapter:
+    """The intentionally small direct-adapter contract used by the facade."""
+
+    STANDARD_PHASES = (
+        "preflight", "inventory", "threat_model", "discovery", "validation",
+        "attack_path", "finalization",
+    )
+    DEEP_PHASES = (
+        "preflight", "inventory", "threat_model", "attack_surface", "auth_data_flow",
+        "injection_file_process_network_state", "deduplicate", "validation",
+        "attack_path", "finalization",
+    )
+
+    def __init__(self, root):
+        self.root = Path(root)
+        self.calls = []
+        self.start_calls = []
+        self.scans = {}
+        self.requests = {}
+        self.disable_reconcile = False
+        self.next_scan = 0
+
+    def start_scan(self, mode, target, user_context, request_id):
+        if request_id in self.requests:
+            scan_id = self.requests[request_id]
+            return {"workspace": {"results": {"scanId": scan_id}}}
+        self.start_calls.append((mode, target, user_context, request_id))
+        self.calls.append("start_scan")
+        self.next_scan += 1
+        scan_id = f"scan-{self.next_scan:04d}"
+        self.scans[scan_id] = {
+            "status": "running",
+            "phase": "preflight",
+            "reviewMode": "chatgpt_deep" if user_context == "deep" else "standard",
+            "scanDir": str(self.root / "private-scan-state"),
+            "handoffToken": "handoff-secret-should-not-escape",
+            "workspaceRoot": str(self.root),
+        }
+        self.requests[request_id] = scan_id
+        return {"workspace": {"results": {"scanId": scan_id}}}
+
+    def find_scan_by_request(self, request_id, payload_hash):
+        if self.disable_reconcile:
+            return None
+        scan_id = self.requests.get(request_id)
+        return {"workspace": {"results": {"scanId": scan_id}}} if scan_id else None
+
+    def get_scan(self, scan_id):
+        self.calls.append("get_scan")
+        return {"structuredContent": {"workspace": {"results": dict(self.scans[scan_id])}}}
+
+    def continue_scan(self, scan_id):
+        self.calls.append("continue_scan")
+        return self.get_scan(scan_id)
+
+    def commit_phase(self, scan_id, phase, phase_data, request_id):
+        self.calls.append(("commit_phase", phase, phase_data, request_id))
+        state = self.scans[scan_id]
+        phases = self.DEEP_PHASES if state.get("reviewMode") == "chatgpt_deep" else self.STANDARD_PHASES
+        next_phase = phases[phases.index(phase) + 1] if phases.index(phase) + 1 < len(phases) else "complete"
+        state["phase"] = phase if next_phase == "complete" else next_phase
+        return self.get_scan(scan_id)
+
+    def complete_scan(self, scan_id, request_id):
+        self.calls.append(("complete_scan", request_id))
+        self.scans[scan_id]["status"] = "completed"
+        self.scans[scan_id]["phase"] = "complete"
+        return self.get_scan(scan_id)
+
+    def cancel_scan(self, scan_id, request_id):
+        self.calls.append(("cancel_scan", request_id))
+        self.scans[scan_id]["status"] = "cancelled"
+        return self.get_scan(scan_id)
+
+    def list_findings(self, scan_id, cursor, limit):
+        self.calls.append(("list_findings", cursor, limit))
+        return {
+            "structuredContent": {"findingsPage": {
+                "findings": [{
+                    "id": "finding-1",
+                    "title": "unsafe input",
+                    "severity": "high",
+                    "description": "token=private-token and /private/path must be hidden",
+                    "file": str(self.root / "src" / "app.py"),
+                    "token": "private-token",
+                }],
+                "nextOffset": 1,
+                "total": 1,
+            }},
+        }
+
+    def export_findings(self, scan_id, format):
+        self.calls.append(("export_findings", format))
+        return json.dumps({
+            "findings": [{"file": str(self.root / "src" / "app.py")}],
+            "scanDir": str(self.root / "private-scan-state"),
+            "token": "private-token",
+        })
+
+    def show_security_scan_panel(self):
+        self.calls.append("show_security_scan_panel")
+        return {
+            "repository": {
+                "name": self.root.name,
+                "workspaceRoot": str(self.root),
+                "gitRepository": False,
+            },
+        }
+
+
+class SecurityBridgeTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="security-bridge-test-")
+        base = Path(self.temp.name)
+        self.root = base / "project"
+        self.root.mkdir()
+        self.config = BridgeConfig(self.root, {}, state_dir=base / "state")
+        self.runtime = RuntimeStub()
+        self.adapter = DirectSecurityAdapter(self.root)
+        self.bridge = LocalBridge(self.config, self.runtime, security_adapter=self.adapter)
+
+    def tearDown(self):
+        self.bridge.close()
+        self.temp.cleanup()
+
+    def new_bridge(self, state_name, adapter=None):
+        base = Path(self.temp.name)
+        runtime = RuntimeStub()
+        config = BridgeConfig(self.root, {}, state_dir=base / state_name)
+        return LocalBridge(config, runtime, security_adapter=adapter or DirectSecurityAdapter(self.root))
+
+    def test_standard_workflow_mapping_guard_and_terminal_mutation_guard(self):
+        with self.assertRaisesRegex(BridgeError, "review_mode"):
+            self.bridge.security_start_scan("native_deep", "codebase", request_id="invalid-001")
+        started = self.bridge.security_start_scan("standard", "codebase", request_id="start-001")
+        self.assertEqual(started["scanId"], "scan-0001")
+        self.assertEqual(started["nextPhase"], "inventory")
+        self.assertEqual(self.adapter.start_calls[0][:2], ("standard", {"kind": "codebase"}))
+        self.assertEqual(self.runtime.calls, [])
+        resumed = self.bridge.security_continue_scan("scan-0001")
+        self.assertEqual(resumed["nextPhase"], "inventory")
+
+        with self.assertRaisesRegex(BridgeError, "SECURITY_PHASE_ORDER"):
+            self.bridge.security_commit_phase("scan-0001", "discovery", request_id="wrong-001",
+                                              candidates=[], coverage={})
+
+        phase_data = {
+            "preflight": {"coverage": {"files": 1}},
+            "inventory": {"coverage": {"files": 1}, "boundaries": ["bridge"]},
+            "threat_model": {"threatModel": {"threats": []}},
+            "discovery": {"candidates": [], "coverage": {"files": 1}},
+            "validation": {"validations": [], "coverage": {"validated": 0}},
+            "attack_path": {"attackPaths": [], "coverage": {"paths": 0}},
+            "finalization": {"findings": [], "coverage": {"complete": True}},
+        }
+        phase = "preflight"
+        for index, (phase, fields) in enumerate(phase_data.items(), start=1):
+            view = self.bridge.security_commit_phase("scan-0001", phase, request_id=f"phase-{index:03d}", **fields)
+            self.assertEqual(view["scanId"], "scan-0001")
+        self.assertEqual(view["phase"], "finalization")
+        completed = self.bridge.security_complete_scan("scan-0001", "complete-001")
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(completed["phase"], "complete")
+
+        with self.assertRaisesRegex(BridgeError, "SECURITY_TERMINAL"):
+            self.bridge.security_commit_phase("scan-0001", "finalization", request_id="late-001",
+                                              findings=[], coverage={})
+
+    def test_restart_retry_is_atomic_and_payload_conflict_is_rejected(self):
+        first = self.bridge.security_start_scan("standard", "codebase", "same context", "restart-001")
+        # Simulate a crash after the direct adapter created the scan but before
+        # the facade persisted scan_id in its own journal.
+        self.bridge.db.execute(
+            "UPDATE security_requests SET scan_id=NULL,status='pending' WHERE request_id=?",
+            ("restart-001",),
+        )
+        self.bridge.db.commit()
+        self.adapter.disable_reconcile = True
+        self.bridge.close()
+        self.bridge = self.new_bridge("state", self.adapter)
+        retry = self.bridge.security_start_scan("standard", "codebase", "same context", "restart-001")
+        self.assertEqual(retry["scanId"], first["scanId"])
+        self.assertEqual(len(self.adapter.start_calls), 1)
+        with self.assertRaisesRegex(BridgeError, "IDEMPOTENCY_CONFLICT"):
+            self.bridge.security_start_scan("standard", "codebase", "different context", "restart-001")
+
+    def test_deep_and_changes_mapping_use_no_runtime_worker(self):
+        deep = self.bridge.security_start_scan("chatgpt_deep", "codebase", user_context="deep", request_id="deep-001")
+        self.assertEqual(deep["reviewMode"], "chatgpt_deep")
+        self.assertEqual(self.adapter.start_calls[-1][0], "standard")
+        self.bridge.security_cancel_scan(deep["scanId"], "deep-cancel-001")
+
+        changes_bridge = self.new_bridge("changes-state")
+        try:
+            with patch("bridge.git_repository", return_value=True):
+                result = changes_bridge.security_start_scan("standard", "changes", request_id="changes-001")
+            self.assertEqual(changes_bridge.security_adapter.start_calls[0][:2],
+                             ("diff", {"kind": "working_tree"}))
+            changes_bridge.security_cancel_scan(result["scanId"], "changes-cancel-001")
+        finally:
+            changes_bridge.close()
+        self.assertEqual(self.runtime.calls, [])
+
+    def test_safe_findings_export_panel_and_terminal_cancel_idempotency(self):
+        started = self.bridge.security_start_scan("standard", "codebase", request_id="safe-001")
+        findings = self.bridge.security_list_findings(started["scanId"])
+        self.assertEqual(findings["findings"][0]["file"], "src/app.py")
+        self.assertNotIn("private-token", json.dumps(findings).lower())
+        exported = self.bridge.security_export_findings(started["scanId"], "json")
+        self.assertNotIn("private-token", json.dumps(exported))
+        self.assertNotIn(str(self.root), json.dumps(exported))
+        panel = self.bridge.show_security_scan_panel()
+        self.assertEqual(panel["panel"], "security-scan-v1")
+        self.assertEqual(panel["supportedReviewModes"], ["standard", "chatgpt_deep"])
+        self.assertNotIn(str(self.root), json.dumps(panel))
+
+        cancelled = self.bridge.security_cancel_scan(started["scanId"], "cancel-001")
+        self.assertEqual(cancelled["status"], "cancelled")
+        repeated = self.bridge.security_cancel_scan(started["scanId"], "cancel-001")
+        self.assertEqual(repeated["status"], "cancelled")
+        with self.assertRaisesRegex(BridgeError, "SECURITY_TERMINAL"):
+            self.bridge.security_complete_scan(started["scanId"], "complete-after-cancel")
+
+
+if __name__ == "__main__":
+    unittest.main()

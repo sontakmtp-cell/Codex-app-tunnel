@@ -14,7 +14,13 @@ Chạy script cũ bằng Windows PowerShell 5.1:
 
 Script tự đọc khóa tunnel hiện có, chạy self-test, kiểm tra App Server rồi mở tunnel. Nếu đúng tunnel coding đã chạy, script báo PID và kết thúc; không mở thêm bridge cùng journal. Không sửa cấu hình Blender/SolidWorks.
 
-Trong ChatGPT, dùng app **Codex app** đã kết nối. Sau khi thay đổi danh sách tool, vào Settings → Apps → Codex app → **Làm mới**. Hỏi: “Đọc project_info rồi mở show_control_panel”. Bảng có chế độ Normal/Turbo cùng các phần Đợt sửa, Test/build và Project/kết nối. Các tool dữ liệu cập nhật bảng hiện tại; chỉ `show_control_panel` tạo bảng mới. Xác nhận bắt buộc của ChatGPT vẫn do ChatGPT quản lý.
+Trong ChatGPT, dùng app **Codex app** đã kết nối. Sau khi thay đổi danh sách tool hoặc panel, vào Settings → Apps → Codex app → **Làm mới**. Nếu host vẫn giữ resource hoặc hành vi cũ, đặc biệt là nút `Bắt đầu quét` tạo scan nhưng không tự tiếp tục hội thoại, hãy gỡ rồi cài lại plugin **MCP Bridge local** trong ChatGPT Web, mở lại chat/panel và kiểm tra lại. Đây là bước loại cache của plugin/host, không thay đổi kiến trúc MCP. Hỏi: “Đọc project_info rồi mở show_control_panel”. Bảng mới có bốn tab Runtime, Đợt sửa/Diff, Task/Terminal và Workspace/Topology; Normal/Turbo vẫn yêu cầu xác nhận theo policy. Các tool dữ liệu cập nhật bề mặt hiện tại; `show_control_panel` mở control panel, còn `show_security_scan_panel` mở Security widget resource riêng. Xác nhận bắt buộc của ChatGPT vẫn do ChatGPT quản lý.
+
+## Security MCP V1
+
+Security widget dùng resource riêng `ui://local-bridge/security-scan-v1.html`; nó không thay thế và không chia sẻ trạng thái presentation với `control-panel-v2`. Khi người dùng bấm `Bắt đầu quét`, widget dispatch request của Security và message vào đúng phiên ChatGPT trong cùng lượt click; ChatGPT Web tự tiếp tục workflow, không cần người dùng gửi thêm lệnh trong chat.
+
+V1 chỉ quảng bá `standard` và `chatgpt_deep`. Cả hai mode đều dùng ChatGPT Web để reasoning, không tạo Codex worker, không gọi native Deep và không expose `native_deep`, `model` hoặc `reasoningEffort` ra giao diện/tool contract.
 
 Trong Codex desktop, mở cùng đường dẫn đang hiện trong `project_info` để xem file. Bảng đọc trạng thái Git hiện tại của folder; diff theo từng đợt sửa dùng được cả khi chưa có Git. Bridge không tự tạo repo hoặc chọn lệnh test/build cho folder này.
 
@@ -116,6 +122,17 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\start-chatgpt-coding-t
 Không chạy doctor thứ hai trên cùng journal đang bị bridge giữ khóa. Khi tunnel đang chạy, đọc `project_info` và hai endpoint từ địa chỉ trong `.tunnel-client/chatgpt-coding-health.url` (`/healthz`, `/readyz`). Không công khai địa chỉ/khóa của tunnel.
 
 `test_ui.cjs` là kiểm thử Chromium với MCP host mẫu và project tạm; cần Playwright/Chrome đã cài. Bài này kiểm tra diff/áp dụng/hoàn tác và chống thực thi HTML, không thay thế kiểm thử iframe thật trên ChatGPT.
+
+Kiểm thử Security MCP V1 và cả UI:
+
+```powershell
+uv run --with mcp==2.2.0 --python 3.13 python -m unittest discover -s .\local-bridge -p "test_*.py" -v
+node .\local-bridge\test_security_ui.cjs
+node .\local-bridge\test_ui.cjs
+git diff --check
+```
+
+Phải chạy bộ Python bằng cùng runtime `uv`/`mcp==2.2.0` của tunnel; `python` hệ thống không có SDK `mcp` có thể báo lỗi import dù code không lỗi.
 
 ## Tài liệu giao thức
 
