@@ -39,6 +39,10 @@ function staticContract() {
   mustMatch(/id="user-context"[^>]*maxlength="2000"/, 'bounded context input');
   mustMatch(/id="cancel-scan"/, 'cancel action');
   mustMatch(/id="finding-list"/, 'finding presentation');
+  mustMatch(/id="theme-toggle"/, 'theme toggle');
+  mustMatch(/id="phase-grid"/, 'phase timeline');
+  mustMatch(/data-finding-filter=/, 'finding filters');
+  mustMatch(/Tạo scan mới/, 'reset scan action');
   mustMatch(/data-theme="light"/, 'light theme tokens');
   assert.equal(html.toLowerCase().includes('native_'), false, 'unsupported native mode is not exposed');
   assert.equal(/<select[^>]+model/i.test(html), false, 'no model selector');
@@ -146,6 +150,7 @@ async function browserContract() {
     assert.equal(calls.at(-1).params.arguments.scan_id, 'scan-1');
 
     failMessage = true;
+    await frame.getByRole('button', { name: 'Tạo scan mới', exact: true }).click();
     await frame.locator('#review-chatgpt-deep').click();
     await frame.getByRole('button', { name: 'Bắt đầu quét', exact: true }).click();
     await frame.getByText('scan-2', { exact: true }).waitFor();

@@ -183,23 +183,202 @@
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; }
     }
+
+    /* Visual parity with H:\AI\security-review-mcp. */
+    [data-theme="light"] {
+      --bg: #f5f3ec;
+      --grid: rgba(30, 28, 20, 0.05);
+      --surface: #ffffff;
+      --surface-elevated: #f4f1e6;
+      --surface-subtle: #eae6d8;
+      --surface-hover: #ded9c7;
+      --border: rgba(30, 28, 20, 0.14);
+      --border-subtle: rgba(30, 28, 20, 0.07);
+      --border-hover: rgba(30, 28, 20, 0.3);
+      --text: #201d16;
+      --text-muted: #6b6756;
+      --text-faint: #9c9783;
+      --accent: #d89e18;
+      --accent-2: #806106;
+      --ink: #7a5e08;
+      --accent-soft: rgba(216, 158, 24, 0.14);
+      --accent-glow: rgba(216, 158, 24, 0.25);
+      --ok: #1e7f3c;
+      --ok-soft: rgba(30, 127, 60, 0.1);
+      --ok-border: rgba(30, 127, 60, 0.3);
+      --danger: #c22b32;
+      --danger-soft: rgba(194, 43, 50, 0.1);
+      --danger-border: rgba(194, 43, 50, 0.3);
+      --warning: #a16c09;
+      --warning-soft: rgba(161, 108, 9, 0.12);
+      --warning-border: rgba(161, 108, 9, 0.3);
+      --code-bg: #faf8f2;
+      --radius-sm: 6px;
+      --radius-md: 10px;
+    }
+
+    .app-shell { padding: 24px 16px 32px; }
+    .stack { gap: 16px; }
+    body { background-size: 36px 36px; }
+    .topbar { align-items: center; border-bottom: 1px solid var(--border-subtle); padding: 0 0 20px; }
+    .brand { align-items: center; gap: 12px; }
+    .brand-line { display: flex; align-items: center; gap: 2px; }
+    .brand-mark { display: flex; align-items: center; justify-content: center; width: 36px; height: 36px; padding: 0; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-elevated); color: var(--accent); text-shadow: none; box-shadow: 0 1px 2px #00000012; }
+    .brand-mark svg { width: 20px; height: 20px; }
+    .topbar-actions { display: flex; align-items: center; gap: 8px; }
+    .host-badge { min-height: 32px; padding: 6px 11px; background: var(--surface-elevated); box-shadow: 0 1px 2px #00000012; }
+    .host-badge[data-state="connected"] .status-dot { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+    .host-badge[data-state="error"] .status-dot { background: var(--danger); box-shadow: 0 0 6px var(--danger); }
+    .motion-badge { display: inline-flex; align-items: center; gap: 4px; margin-left: 4px; border: 1px solid var(--border-subtle); border-radius: 4px; background: var(--accent-soft); color: var(--ink); padding: 2px 6px; font-size: 9px; font-weight: 700; letter-spacing: .01em; text-transform: none; }
+    .motion-badge svg { width: 10px; height: 10px; }
+    .theme-toggle { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-elevated); color: var(--text-muted); transition: transform .15s ease, background .15s ease; }
+    .theme-toggle:hover { transform: scale(1.05); background: var(--surface-hover); }
+    .theme-toggle:active { transform: scale(.92); }
+    .theme-toggle svg { width: 16px; height: 16px; }
+    .theme-icon-moon { display: none; color: var(--ink); }
+    [data-theme="light"] .theme-icon-sun { display: none; }
+    [data-theme="light"] .theme-icon-moon { display: block; }
+    .card { background: var(--surface); box-shadow: 0 16px 34px #00000020; }
+    .card-body { padding: 16px; }
+    .choice { padding: 14px; border-radius: var(--radius-md); }
+    .choice-title svg { flex: none; width: 16px; height: 16px; color: var(--accent); }
+    .choice-title .choice-code { display: inline-flex; align-items: center; justify-content: center; min-width: 25px; padding: 2px 6px; border: 1px solid var(--border-subtle); border-radius: 4px; background: var(--surface-subtle); color: var(--accent); font: 600 12px/1 var(--font-mono); }
+    .choice-copy { line-height: 1.5; }
+    .repo-card { margin-top: 14px; border-radius: var(--radius-md); }
+    .repo-row { padding: 8px 14px; }
+    .repo-value-wrap { display: flex; align-items: center; min-width: 0; gap: 8px; }
+    .repo-value-wrap .repo-value { max-width: 100%; }
+    .copy-button { display: inline-flex; flex: none; align-items: center; justify-content: center; border: 0; background: transparent; color: var(--text-muted); padding: 4px; opacity: 0; transition: opacity .15s ease, color .15s ease; }
+    .repo-row:hover .copy-button, .copy-button:focus-visible { opacity: 1; }
+    .copy-button:hover { color: var(--text); }
+    .copy-button svg { width: 12px; height: 12px; }
+    .label { margin-top: 18px; }
+    .card-actions { border-top: 1px solid var(--border-subtle); padding-top: 10px; }
+    .primary-button { min-height: 38px; padding: 9px 20px; box-shadow: 0 4px 12px #00000018; }
+    .scan-card .card-body { padding-bottom: 16px; }
+    .scan-id-row { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+    .scan-id-row .copy-button { opacity: 1; padding: 2px; }
+    .scan-id-row .copy-button svg { width: 13px; height: 13px; }
+    .status-badge { background: var(--surface-elevated); }
+    .stats { gap: 10px; margin: 14px 0 12px; }
+    .stat { border-radius: var(--radius-sm); padding: 12px; transition: border-color .15s ease, transform .15s ease; }
+    .stat:hover { border-color: var(--border-hover); transform: translateY(-2px); }
+    .stat.highlight { border-color: var(--accent); background: var(--accent-soft); box-shadow: 0 0 12px #f1c21b14; }
+    .stat-value { font-size: 17px; }
+    .phase-timeline { padding: 8px 0 4px; }
+    .phase-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; color: var(--text-muted); font: 11px/1.4 var(--font-mono); }
+    .phase-meta strong { color: var(--text); font-weight: 600; }
+    .phase-grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 6px; padding: 3px 0; }
+    .phase-step { position: relative; min-width: 0; }
+    .phase-dot { display: block; height: 8px; border: 1px solid transparent; border-radius: 999px; background: var(--surface-subtle); transition: background .2s ease, border-color .2s ease, transform .2s ease; }
+    .phase-step.is-past .phase-dot { background: var(--ok); }
+    .phase-step.is-current .phase-dot { background: var(--accent); border-color: var(--accent); box-shadow: 0 0 8px var(--accent-glow); transform: scale(1.12); }
+    .phase-step.is-cancelled .phase-dot { background: var(--danger); border-color: var(--danger); }
+    .phase-step.is-current.is-running .phase-dot { position: relative; overflow: hidden; }
+    .phase-step.is-current.is-running .phase-dot::after { content: ""; position: absolute; inset: 0; background: #ffffff66; animation: phase-pulse 1.5s infinite; }
+    .phase-tooltip { position: absolute; z-index: 5; bottom: calc(100% + 8px); left: 50%; display: none; min-width: max-content; transform: translateX(-50%); border: 1px solid var(--border); border-radius: 5px; background: var(--surface-elevated); box-shadow: 0 5px 15px #00000025; color: var(--text); padding: 4px 7px; font: 10px/1.2 var(--font-mono); white-space: nowrap; pointer-events: none; }
+    .phase-step:hover .phase-tooltip { display: block; }
+    .phase-index { color: var(--text-faint); }
+    .progress-wrap { margin-top: 10px; }
+    .progress-copy { display: inline-flex; align-items: center; min-width: 0; gap: 6px; }
+    .activity-icon { display: inline-flex; flex: none; color: var(--accent); }
+    .activity-icon svg { width: 14px; height: 14px; }
+    .progress-track { height: 8px; margin-top: 7px; }
+    .progress-bar { position: relative; overflow: hidden; }
+    .progress-bar.is-cancelled { background: var(--warning); box-shadow: none; }
+    .progress-bar.is-failed { background: var(--danger); box-shadow: none; }
+    .animate-shimmer { position: absolute; inset: 0; width: 55%; background: linear-gradient(90deg, transparent, #ffffff4d, transparent); animation: subtle-shimmer 2.4s infinite ease-in-out; }
+    .findings { margin-top: 12px; padding-top: 14px; }
+    .finding-head { align-items: center; }
+    .finding-heading { display: flex; align-items: center; gap: 8px; }
+    .finding-count { display: inline-flex; align-items: center; justify-content: center; min-width: 24px; padding: 2px 7px; border: 1px solid var(--border-subtle); border-radius: 999px; background: var(--surface-subtle); color: var(--text-muted); font: 10px/1.2 var(--font-mono); }
+    .finding-tools { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 6px; }
+    .filter-chips { display: flex; align-items: center; gap: 4px; }
+    .filter-chip { border: 0; border-radius: 4px; background: var(--surface-subtle); color: var(--text-faint); padding: 3px 6px; font: 10px/1.2 var(--font-mono); text-transform: uppercase; transition: color .15s ease, background .15s ease; }
+    .filter-chip:hover { color: var(--text); }
+    .filter-chip[aria-pressed="true"] { background: var(--accent); color: #171406; font-weight: 700; }
+    .finding-list { max-height: 360px; overflow-y: auto; margin-top: 10px; padding-right: 3px; }
+    .finding { overflow: hidden; border-left-width: 4px; padding: 0; }
+    .finding-summary { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; width: 100%; border: 0; background: transparent; color: inherit; padding: 11px 11px; text-align: left; }
+    .finding-summary:hover { background: var(--surface-hover); }
+    .finding-main { min-width: 0; flex: 1; }
+    .finding-title-row { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+    .severity-badge { display: inline-flex; align-items: center; gap: 4px; flex: none; border: 1px solid var(--warning-border); border-radius: 4px; background: var(--warning-soft); color: var(--warning); padding: 3px 6px; font: 700 10px/1 var(--font-mono); text-transform: uppercase; }
+    .severity-badge svg { width: 13px; height: 13px; }
+    .finding[data-severity="critical"] .severity-badge, .finding[data-severity="high"] .severity-badge { border-color: var(--danger-border); background: var(--danger-soft); color: var(--danger); }
+    .finding[data-severity="low"] .severity-badge, .finding[data-severity="info"] .severity-badge { border-color: var(--ok-border); background: var(--ok-soft); color: var(--ok); }
+    .finding-title { min-width: 0; white-space: nowrap; }
+    .finding-path { display: flex; align-items: center; gap: 5px; margin-top: 5px; color: var(--text-muted); font-size: 11px; }
+    .finding-path svg { flex: none; width: 12px; height: 12px; color: var(--text-faint); }
+    .finding-toggle { flex: none; padding: 3px; color: var(--text-faint); transition: color .15s ease, transform .2s ease; }
+    .finding-toggle svg { display: block; width: 16px; height: 16px; }
+    .finding-summary:hover .finding-toggle { color: var(--text); }
+    .finding.expanded .finding-toggle { transform: rotate(180deg); }
+    .finding-details { border-top: 1px solid var(--border-subtle); background: color-mix(in srgb, var(--surface-elevated) 40%, transparent); padding: 9px 12px 11px; }
+    .finding-details[hidden] { display: none; }
+    .finding-rule { display: inline-block; border-radius: 4px; background: var(--accent-soft); color: var(--accent); padding: 4px 7px; font: 11px/1.3 var(--font-mono); }
+    .finding-description { margin-top: 7px; color: var(--text-muted); font-size: 11px; line-height: 1.5; }
+    .empty-findings { border: 1px dashed var(--border-subtle); border-radius: var(--radius-sm); padding: 16px 10px; text-align: center; }
+    .scan-actions { align-items: center; }
+    .scan-action-buttons { display: flex; align-items: center; gap: 8px; }
+    .scan-actions .danger-button, .scan-actions .secondary-button { display: inline-flex; align-items: center; gap: 6px; }
+    .scan-actions svg { width: 14px; height: 14px; }
+    .notice { padding: 12px; }
+    .notice-row { align-items: center; }
+    .notice-text-wrap { display: flex; align-items: center; min-width: 0; gap: 8px; }
+    .notice-icon { flex: none; width: 16px; height: 16px; color: var(--warning); }
+    .notice.error .notice-icon { color: var(--danger); }
+    .footer-note { margin-top: 15px; }
+    @keyframes phase-pulse { 0%, 100% { opacity: .2; } 50% { opacity: .7; } }
+    @media (min-width: 640px) {
+      .card-body { padding: 20px; }
+    }
+    @media (max-width: 620px) {
+      .app-shell { padding: 16px 10px 24px; }
+      .topbar { align-items: flex-start; flex-direction: column; gap: 10px; }
+      .topbar-actions { width: 100%; justify-content: space-between; }
+      .grid-2, .stats { grid-template-columns: 1fr; }
+      .finding-head { align-items: flex-start; flex-direction: column; }
+      .finding-tools { justify-content: flex-start; }
+      .card-actions { align-items: stretch; flex-direction: column; }
+      .card-actions button { width: 100%; }
+      .phase-grid { gap: 3px; }
+      .phase-tooltip { left: 0; transform: none; }
+    }
   </style>
 </head>
 <body>
   <div class="app-shell" id="security-app">
     <header class="topbar">
       <div class="brand">
-        <div class="brand-mark" aria-hidden="true">◆</div>
+        <div class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"></path>
+            <path d="m9 12 2 2 4-4"></path>
+          </svg>
+        </div>
         <div>
-          <p class="eyebrow">Security MCP App · V1</p>
+          <div class="brand-line">
+            <p class="eyebrow">Security MCP App · V1</p>
+            <span class="motion-badge">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"></path></svg>
+              Motion UX
+            </span>
+          </div>
           <h1>Security review</h1>
         </div>
       </div>
-      <div class="host-badge" id="host-badge"><span class="status-dot" aria-hidden="true"></span><span id="host-label">Đang kết nối…</span></div>
+      <div class="topbar-actions">
+        <div class="host-badge" id="host-badge" data-state="idle"><span class="status-dot" aria-hidden="true"></span><span id="host-label">Đang kết nối…</span></div>
+        <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Chuyển sang giao diện sáng" title="Chuyển giao diện">
+          <svg class="theme-icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2"></path><path d="M12 20v2"></path><path d="m4.93 4.93 1.41 1.41"></path><path d="m17.66 17.66 1.41 1.41"></path><path d="M2 12h2"></path><path d="M20 12h2"></path><path d="m6.34 17.66-1.41 1.41"></path><path d="m19.07 4.93-1.41 1.41"></path></svg>
+          <svg class="theme-icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"></path></svg>
+        </button>
+      </div>
     </header>
 
     <main class="stack">
-      <section class="card" aria-labelledby="new-scan-heading">
+      <section class="card new-scan-section" id="new-scan-section" aria-labelledby="new-scan-heading">
         <div class="card-body">
           <div class="section-heading">
             <div>
@@ -213,36 +392,36 @@
           <span class="label">Phạm vi</span>
           <div class="grid-2" role="group" aria-label="Phạm vi quét">
             <button class="choice" id="target-codebase" type="button" data-target="codebase" aria-pressed="true">
-              <span class="choice-title"><span aria-hidden="true">⌘</span><span>Cơ sở mã</span></span>
+              <span class="choice-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" x2="20" y1="19" y2="19"></line></svg><span>Cơ sở mã</span></span>
               <span class="choice-copy">Đọc toàn bộ project cố định trong bridge.</span>
             </button>
             <button class="choice" id="target-changes" type="button" data-target="changes" aria-pressed="false">
-              <span class="choice-title"><span aria-hidden="true">Δ</span><span>Thay đổi</span></span>
+              <span class="choice-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="6" x2="6" y1="3" y2="15"></line><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle><path d="M18 9a9 9 0 0 1-9 9"></path></svg><span>Thay đổi</span></span>
               <span class="choice-copy">Review working tree hiện tại nếu repo hỗ trợ.</span>
             </button>
           </div>
 
           <div class="repo-card" aria-label="Thông tin repository">
-            <div class="repo-row"><span class="repo-key">Repository</span><span class="repo-value mono" id="repo-name">Đang tải…</span></div>
-            <div class="repo-row"><span class="repo-key">Project</span><span class="repo-value mono" id="repo-path">—</span></div>
-            <div class="repo-row"><span class="repo-key">Branch</span><span class="repo-value mono" id="repo-branch">—</span></div>
-            <div class="repo-row"><span class="repo-key">Commit</span><span class="repo-value mono" id="repo-commit">—</span></div>
+            <div class="repo-row"><span class="repo-key">Repository</span><span class="repo-value-wrap"><span class="repo-value mono" id="repo-name">Đang tải…</span><button class="copy-button" type="button" data-copy-target="repo-name" aria-label="Sao chép Repository" title="Sao chép Repository"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2-2-2h10c1.1 0 2 .9 2 2"></path></svg></button></span></div>
+            <div class="repo-row"><span class="repo-key">Project</span><span class="repo-value-wrap"><span class="repo-value mono" id="repo-path">—</span><button class="copy-button" type="button" data-copy-target="repo-path" aria-label="Sao chép Project" title="Sao chép Project"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2-2-2h10c1.1 0 2 .9 2 2"></path></svg></button></span></div>
+            <div class="repo-row"><span class="repo-key">Branch</span><span class="repo-value-wrap"><span class="repo-value mono" id="repo-branch">—</span><button class="copy-button" type="button" data-copy-target="repo-branch" aria-label="Sao chép Branch" title="Sao chép Branch"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path></svg></button></span></div>
+            <div class="repo-row"><span class="repo-key">Commit</span><span class="repo-value-wrap"><span class="repo-value mono" id="repo-commit">—</span><button class="copy-button" type="button" data-copy-target="repo-commit" aria-label="Sao chép Commit" title="Sao chép Commit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2-2-2h10c1.1 0 2 .9 2 2"></path></svg></button></span></div>
           </div>
 
           <span class="label">Review mode</span>
           <div class="grid-2" role="group" aria-label="Review mode">
             <button class="choice" id="review-standard" type="button" data-mode="standard" aria-pressed="true">
-              <span class="choice-title"><span aria-hidden="true">01</span><span>Standard</span></span>
+              <span class="choice-title"><span class="choice-code">01</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg><span>Standard</span></span>
               <span class="choice-copy">Một discovery pass, validate trước khi chốt finding.</span>
             </button>
             <button class="choice" id="review-chatgpt-deep" type="button" data-mode="chatgpt_deep" aria-pressed="false">
-              <span class="choice-title"><span aria-hidden="true">03</span><span>ChatGPT Deep</span></span>
-              <span class="choice-copy">Ba pass độc lập do ChatGPT Web điều phối.</span>
+              <span class="choice-title"><span class="choice-code">03</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12.83 2.18 8.26 4.16a1 1 0 0 1 0 1.79l-8.26 4.16a2 2 0 0 1-1.66 0L2.91 8.13a1 1 0 0 1 0-1.79l8.26-4.16a2 2 0 0 1 1.66 0Z"></path><path d="m22 12-9.17 4.61a2 2 0 0 1-1.66 0L2 12"></path><path d="m22 16-9.17 4.61a2 2 0 0 1-1.66 0L2 16"></path></svg><span>ChatGPT Deep</span></span>
+              <span class="choice-copy">Ba pass độc lập do ChatGPT Web điều phối và tổng hợp.</span>
             </button>
           </div>
 
           <label class="label" for="user-context">Ngữ cảnh bổ sung <span class="sr-only">tùy chọn</span></label>
-          <textarea id="user-context" maxlength="2000" placeholder="Ví dụ: ưu tiên luồng xác thực và xử lý file…"></textarea>
+          <textarea id="user-context" rows="3" maxlength="2000" placeholder="Ví dụ: ưu tiên luồng xác thực, kiểm tra xử lý file upload và quyền truy cập API..."></textarea>
           <div class="field-hint"><span>Không gửi path tùy ý; bridge giữ target cố định.</span><span id="context-count">0 / 2000</span></div>
 
           <div class="card-actions">
@@ -258,43 +437,64 @@
             <div>
               <p class="eyebrow">Trạng thái authoritative</p>
               <h2 id="scan-heading">Đang theo dõi Security scan</h2>
-              <p class="scan-id mono" id="scan-id">—</p>
+              <div class="scan-id-row"><p class="scan-id mono" id="scan-id">—</p><button class="copy-button" id="copy-scan-id" type="button" aria-label="Sao chép Scan ID" title="Sao chép Scan ID"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2-2-2h10c1.1 0 2 .9 2 2"></path></svg></button></div>
             </div>
             <span class="status-badge" id="live-status" data-state="connected"><span class="status-dot" aria-hidden="true"></span><span id="live-status-label">Đang chạy</span></span>
           </div>
 
           <div class="stats" aria-label="Tiến độ scan">
-            <div class="stat"><div class="stat-label">Phase hiện tại</div><div class="stat-value" id="scan-phase">—</div></div>
+            <div class="stat" id="stat-phase"><div class="stat-label">Phase hiện tại</div><div class="stat-value" id="scan-phase">—</div></div>
             <div class="stat"><div class="stat-label">Tiếp theo</div><div class="stat-value" id="scan-next-phase">—</div></div>
-            <div class="stat"><div class="stat-label">Findings</div><div class="stat-value" id="finding-total">0</div></div>
+            <div class="stat" id="stat-findings"><div class="stat-label">Findings</div><div class="stat-value" id="finding-total">0</div></div>
             <div class="stat"><div class="stat-label">Cập nhật</div><div class="stat-value" id="scan-updated" title="">—</div></div>
           </div>
 
+          <div class="phase-timeline" aria-label="Tiến trình 12 giai đoạn">
+            <div class="phase-meta"><span>Tiến trình 12 giai đoạn</span><strong id="phase-progress-label">1 / 12 (Preflight)</strong></div>
+            <div class="phase-grid" id="phase-grid">
+              <div class="phase-step" data-phase="preflight"><span class="phase-dot"></span><span class="phase-tooltip"><span class="phase-index">#1</span> Preflight</span></div>
+              <div class="phase-step" data-phase="inventory"><span class="phase-dot"></span><span class="phase-tooltip"><span class="phase-index">#2</span> Inventory</span></div>
+              <div class="phase-step" data-phase="threat_model"><span class="phase-dot"></span><span class="phase-tooltip"><span class="phase-index">#3</span> Threat model</span></div>
+              <div class="phase-step" data-phase="discovery"><span class="phase-dot"></span><span class="phase-tooltip"><span class="phase-index">#4</span> Discovery</span></div>
+              <div class="phase-step" data-phase="attack_surface"><span class="phase-dot"></span><span class="phase-tooltip"><span class="phase-index">#5</span> Attack surface</span></div>
+              <div class="phase-step" data-phase="auth_data_flow"><span class="phase-dot"></span><span class="phase-tooltip"><span class="phase-index">#6</span> Auth &amp; data flow</span></div>
+              <div class="phase-step" data-phase="injection_file_process_network_state"><span class="phase-dot"></span><span class="phase-tooltip"><span class="phase-index">#7</span> Injection &amp; process state</span></div>
+              <div class="phase-step" data-phase="deduplicate"><span class="phase-dot"></span><span class="phase-tooltip"><span class="phase-index">#8</span> Deduplicate</span></div>
+              <div class="phase-step" data-phase="validation"><span class="phase-dot"></span><span class="phase-tooltip"><span class="phase-index">#9</span> Validation</span></div>
+              <div class="phase-step" data-phase="attack_path"><span class="phase-dot"></span><span class="phase-tooltip"><span class="phase-index">#10</span> Attack path</span></div>
+              <div class="phase-step" data-phase="finalization"><span class="phase-dot"></span><span class="phase-tooltip"><span class="phase-index">#11</span> Finalization</span></div>
+              <div class="phase-step" data-phase="complete"><span class="phase-dot"></span><span class="phase-tooltip"><span class="phase-index">#12</span> Hoàn tất</span></div>
+            </div>
+          </div>
+
           <div class="progress-wrap">
-            <div class="progress-label"><span id="progress-copy">Đang lấy trạng thái…</span><strong id="progress-percent">0%</strong></div>
+            <div class="progress-label"><span class="progress-copy"><span class="activity-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"></path></svg></span><span id="progress-copy">Đang lấy trạng thái…</span></span><strong id="progress-percent">0%</strong></div>
             <div class="progress-track" id="progress-track" role="progressbar" aria-label="Tiến độ Security scan" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="progress-bar" id="progress-bar"></div></div>
           </div>
 
           <div class="findings">
-            <div class="finding-head"><h3>Findings đã ghi nhận</h3><span class="pill" id="coverage-label">Coverage: —</span></div>
+            <div class="finding-head">
+              <div class="finding-heading"><h3>Findings đã ghi nhận</h3><span class="finding-count" id="finding-count-badge">0</span></div>
+              <div class="finding-tools"><span class="pill" id="coverage-label">Coverage: —</span><div class="filter-chips" id="severity-filters" hidden><button class="filter-chip" type="button" data-finding-filter="all" aria-pressed="true">Tất cả</button><button class="filter-chip" type="button" data-finding-filter="critical" aria-pressed="false">critical</button><button class="filter-chip" type="button" data-finding-filter="high" aria-pressed="false">high</button><button class="filter-chip" type="button" data-finding-filter="medium" aria-pressed="false">medium</button><button class="filter-chip" type="button" data-finding-filter="low" aria-pressed="false">low</button></div></div>
+            </div>
             <div class="finding-list" id="finding-list"><p class="muted">Chưa có finding nào.</p></div>
           </div>
 
-          <div class="card-actions">
+          <div class="card-actions scan-actions">
             <p class="muted" id="scan-help">Không tạo scan mới khi đang theo dõi scan này.</p>
-            <button class="danger-button" id="cancel-scan" type="button">Hủy scan</button>
+            <div class="scan-action-buttons"><button class="secondary-button" id="new-scan" type="button" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7"></path><path d="M3 4v5h5"></path></svg><span>Tạo scan mới</span></button><button class="danger-button" id="cancel-scan" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><path d="m15 9-6 6"></path><path d="m9 9 6 6"></path></svg><span>Hủy scan</span></button></div>
           </div>
         </div>
       </section>
 
       <section class="notice" id="message-notice" hidden role="alert">
         <div class="notice-row">
-          <span class="notice-text" id="message-notice-text"></span>
+          <span class="notice-text-wrap"><svg class="notice-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><path d="M12 8v4"></path><path d="M12 16h.01"></path></svg><span class="notice-text" id="message-notice-text"></span></span>
           <button class="secondary-button" id="retry-message" type="button">Gửi lại message</button>
         </div>
       </section>
     </main>
-    <p class="footer-note">Security MCP là nguồn trạng thái duy nhất · Widget chỉ giữ state trình bày trong phiên hiện tại.</p>
+    <p class="footer-note">Security MCP là nguồn trạng thái duy nhất · Giao diện tích hợp hiệu ứng chuyển động tinh tế</p>
   </div>
 
   <script>
@@ -309,12 +509,26 @@
         discovery: "Discovery",
         attack_surface: "Attack surface",
         auth_data_flow: "Auth & data flow",
-        injection_file_process_network_state: "Injection / file / process / network / state",
+        injection_file_process_network_state: "Injection & process state",
         deduplicate: "Deduplicate",
         validation: "Validation",
         attack_path: "Attack path",
         finalization: "Finalization",
-        complete: "Complete"
+        complete: "Hoàn tất"
+      };
+      const PHASE_DESCRIPTIONS = {
+        preflight: "Kiểm tra cấu hình môi trường, quyền hạn và tính toàn vẹn bridge",
+        inventory: "Lập danh mục thành phần phụ thuộc, package lock và tệp cấu hình",
+        threat_model: "Xác định mô hình đe dọa và các ranh giới ủy quyền",
+        discovery: "Duyệt AST và quét quy tắc bảo mật tự động",
+        attack_surface: "Đánh giá bề mặt tấn công API công khai và endpoint",
+        auth_data_flow: "Phân tích luồng xác thực, session token và RBAC",
+        injection_file_process_network_state: "Kiểm tra SQLi, Command Injection, SSRF và Path Traversal",
+        deduplicate: "Loại bỏ trùng lặp và tương quan các cảnh báo",
+        validation: "Kiểm chứng bằng chứng ngữ cảnh để loại bỏ false positive",
+        attack_path: "Dựng chuỗi tấn công (attack graph) cho các lỗ hổng nghiêm trọng",
+        finalization: "Tổng hợp báo cáo và gán định danh chuẩn CVE/CWE",
+        complete: "Hoàn thành toàn bộ quy trình kiểm toán an toàn"
       };
       const STATUS_LABELS = {
         idle: "Sẵn sàng",
@@ -336,12 +550,14 @@
         scan: null,
         repo: null,
         latestScan: null,
+        changesSupported: true,
         startBusy: false,
         cancelBusy: false,
         messageBusy: false,
         messagePending: false,
         notice: "",
         noticeError: false,
+        findingFilter: "all",
         pollTimer: null,
         pollBusy: false
       };
@@ -446,33 +662,120 @@
           critical: Number(counts.critical) || 0,
           high: Number(counts.high) || 0,
           medium: Number(counts.medium) || 0,
-          low: Number(counts.low) || 0
+          low: Number(counts.low) || 0,
+          info: Number(counts.info) || 0
         };
+      }
+
+      const ICON_PATHS = {
+        shieldAlert: '<path d="M20 13c0 5-3.5 7.5-8 8.5-4.5-1-8-3.5-8-8.5V5l8-3 8 3v8Z"></path><path d="M12 8v4"></path><path d="M12 16h.01"></path>',
+        alertCircle: '<circle cx="12" cy="12" r="10"></circle><line x1="12" x2="12" y1="8" y2="12"></line><line x1="12" x2="12.01" y1="16" y2="16"></line>',
+        alertTriangle: '<path d="m21.73 18-8-14a2 2 0 0 0-3.46 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"></path><path d="M12 9v4"></path><path d="M12 17h.01"></path>',
+        info: '<circle cx="12" cy="12" r="10"></circle><path d="M12 16v-4"></path><path d="M12 8h.01"></path>',
+        fileCode: '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"></path><path d="M14 2v6h6"></path><path d="m10 13-2 2 2 2"></path><path d="m14 17 2-2-2-2"></path>',
+        chevronDown: '<path d="m6 9 6 6 6-6"></path>'
+      };
+
+      function createIcon(name) {
+        const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        icon.setAttribute("viewBox", "0 0 24 24");
+        icon.setAttribute("fill", "none");
+        icon.setAttribute("stroke", "currentColor");
+        icon.setAttribute("stroke-width", "2");
+        icon.setAttribute("stroke-linecap", "round");
+        icon.setAttribute("stroke-linejoin", "round");
+        icon.setAttribute("aria-hidden", "true");
+        icon.innerHTML = ICON_PATHS[name] || "";
+        return icon;
+      }
+
+      function severityIcon(severity) {
+        return createIcon(
+          severity === "critical" ? "shieldAlert" : severity === "high" ? "alertCircle" : severity === "medium" ? "alertTriangle" : "info"
+        );
+      }
+
+      function renderFindingFilters(hasFindings) {
+        const filters = $("severity-filters");
+        filters.hidden = !hasFindings;
+        filters.querySelectorAll("[data-finding-filter]").forEach((button) => {
+          button.setAttribute("aria-pressed", String(button.dataset.findingFilter === state.findingFilter));
+        });
       }
 
       function renderFindings(scan) {
         const list = $("finding-list");
         list.replaceChildren();
-        const findings = Array.isArray(scan && scan.findings) ? scan.findings.slice(0, 8) : [];
+        const allFindings = Array.isArray(scan && scan.findings) ? scan.findings.slice(0, 20) : [];
+        const findings = state.findingFilter === "all"
+          ? allFindings
+          : allFindings.filter((finding) => String(finding.severity || "medium").toLowerCase() === state.findingFilter);
+        $("finding-count-badge").textContent = String(allFindings.length);
+        renderFindingFilters(allFindings.length > 0);
         if (!findings.length) {
           const empty = document.createElement("p");
-          empty.className = "muted";
-          empty.textContent = "Chưa có finding nào.";
+          empty.className = "muted empty-findings";
+          empty.textContent = allFindings.length
+            ? "Không có finding nào phù hợp với bộ lọc đã chọn."
+            : isRunning(scan)
+              ? "Đang phân tích các luồng mã nguồn, findings sẽ xuất hiện tại đây..."
+              : "Không phát hiện lỗ hổng bảo mật nào trong phạm vi quét.";
           list.appendChild(empty);
           return;
         }
-        findings.forEach((finding) => {
-          const row = document.createElement("div");
+        findings.forEach((finding, index) => {
+          const row = document.createElement("article");
           const severity = String(finding.severity || "medium").toLowerCase();
           row.className = "finding";
           row.dataset.severity = severity;
-          const title = document.createElement("div");
+
+          const summary = document.createElement("button");
+          summary.type = "button";
+          summary.className = "finding-summary";
+          summary.setAttribute("aria-expanded", "false");
+          const main = document.createElement("span");
+          main.className = "finding-main";
+          const titleRow = document.createElement("span");
+          titleRow.className = "finding-title-row";
+          const badge = document.createElement("span");
+          badge.className = "severity-badge";
+          badge.append(severityIcon(severity), document.createTextNode(severity));
+          const title = document.createElement("span");
           title.className = "finding-title";
           title.textContent = text(finding.title || finding.name, "Untitled finding");
-          const meta = document.createElement("div");
-          meta.className = "finding-meta mono";
-          meta.textContent = [severity.toUpperCase(), finding.path || finding.file, finding.line ? `line ${finding.line}` : ""].filter(Boolean).join(" · ");
-          row.append(title, meta);
+          titleRow.append(badge, title);
+          const path = document.createElement("span");
+          path.className = "finding-path mono";
+          path.append(createIcon("fileCode"), document.createTextNode([finding.path || finding.file, finding.line ? `· dòng ${finding.line}` : ""].filter(Boolean).join(" ")));
+          main.append(titleRow, path);
+          const toggle = document.createElement("span");
+          toggle.className = "finding-toggle";
+          toggle.setAttribute("aria-hidden", "true");
+          toggle.appendChild(createIcon("chevronDown"));
+          summary.append(main, toggle);
+
+          const details = document.createElement("div");
+          details.className = "finding-details";
+          details.hidden = true;
+          if (finding.rule) {
+            const rule = document.createElement("div");
+            rule.className = "finding-rule";
+            rule.textContent = finding.rule;
+            details.appendChild(rule);
+          }
+          if (finding.description) {
+            const description = document.createElement("p");
+            description.className = "finding-description";
+            description.textContent = finding.description;
+            details.appendChild(description);
+          }
+          summary.addEventListener("click", () => {
+            const expanded = !details.hidden;
+            details.hidden = expanded;
+            summary.setAttribute("aria-expanded", String(!expanded));
+            row.classList.toggle("expanded", !expanded);
+          });
+          row.append(summary, details);
           list.appendChild(row);
         });
       }
@@ -486,15 +789,39 @@
         $("repo-commit").textContent = text(repo.commit || repo.commitSha || repo.sha);
       }
 
+      function renderPhaseTimeline(scan) {
+        const phase = String(scan && (scan.phase || scan.currentPhase) || "preflight").toLowerCase();
+        const currentIndex = Math.max(0, PHASES.indexOf(phase));
+        const complete = Boolean(scan && (statusKey(scan) === "completed" || phase === "complete"));
+        const cancelled = Boolean(scan && statusKey(scan) === "cancelled");
+        const running = Boolean(scan && isRunning(scan));
+        $("phase-progress-label").textContent = `${complete ? PHASES.length : currentIndex + 1} / ${PHASES.length} (${phaseLabel(phase)})`;
+        $("phase-grid").querySelectorAll("[data-phase]").forEach((step, index) => {
+          const past = complete || index < currentIndex;
+          const current = !complete && index === currentIndex;
+          step.className = "phase-step";
+          if (past) step.classList.add("is-past");
+          if (current) step.classList.add("is-current");
+          if (current && cancelled) step.classList.add("is-cancelled");
+          if (current && running) step.classList.add("is-running");
+          step.setAttribute("aria-current", current ? "step" : "false");
+        });
+      }
+
       function renderScan() {
         const scan = state.scan;
+        $("new-scan-section").hidden = Boolean(scan);
         $("scan-card").hidden = !scan;
         $("start-scan").disabled = state.startBusy || isRunning(scan);
         $("cancel-scan").disabled = state.cancelBusy || !isRunning(scan);
         $("cancel-scan").hidden = !isRunning(scan);
-        $("start-help").textContent = state.startBusy ? "Đang tạo scan…" : isRunning(scan) ? "Scan đang chạy; không tạo scan mới." : "Kết quả và trạng thái luôn được đọc lại từ Security MCP.";
+        $("new-scan").hidden = !scan || isRunning(scan);
+        $("start-help").textContent = state.startBusy
+          ? "Đang khởi tạo scan…"
+          : "Kết quả và trạng thái luôn được đọc lại từ Security MCP.";
         if (!scan) {
           setStatus($("scan-status"), $("scan-status-label"), "idle");
+          renderPhaseTimeline(null);
           return;
         }
         $("scan-id").textContent = scan.scanId;
@@ -506,21 +833,50 @@
         $("scan-next-phase").textContent = phaseLabel(next);
         const counts = findingCounts(scan);
         $("finding-total").textContent = String(counts.total);
+        $("stat-phase").classList.toggle("highlight", isRunning(scan));
+        $("stat-findings").classList.toggle("highlight", counts.critical > 0);
         const progress = Math.round(scanProgress(scan));
         $("progress-percent").textContent = `${progress}%`;
         $("progress-bar").style.width = `${progress}%`;
+        $("progress-bar").classList.toggle("is-cancelled", statusKey(scan) === "cancelled");
+        $("progress-bar").classList.toggle("is-failed", statusKey(scan) === "failed");
+        $("progress-bar").replaceChildren();
+        if (isRunning(scan)) {
+          const shimmer = document.createElement("div");
+          shimmer.className = "animate-shimmer";
+          $("progress-bar").appendChild(shimmer);
+        }
         $("progress-track").setAttribute("aria-valuenow", String(progress));
-        $("progress-copy").textContent = isTerminal(scan) ? (STATUS_LABELS[statusKey(scan)] || "Đã kết thúc") : `Phase: ${phaseLabel(phase)}`;
+        const progressCopy = isTerminal(scan)
+          ? statusKey(scan) === "completed"
+            ? "Toàn bộ các quy tắc bảo mật đã kiểm tra thành công"
+            : statusKey(scan) === "cancelled"
+              ? "Quy trình quét đã bị hủy bỏ bởi người dùng"
+              : "Quy trình quét thất bại; hãy kiểm tra log authoritative"
+          : PHASE_DESCRIPTIONS[String(phase || "").toLowerCase()] || `Giai đoạn: ${phaseLabel(phase)}`;
+        $("progress-copy").textContent = progressCopy;
         $("scan-updated").textContent = displayTime(scan.updatedAt || scan.updated_at);
         $("scan-updated").title = text(scan.updatedAt || scan.updated_at);
         const coverage = scan.coverageSoFar || scan.coverage || scan.coverage_so_far;
         $("coverage-label").textContent = `Coverage: ${typeof coverage === "number" ? `${Math.round(coverage * (coverage <= 1 ? 100 : 1))}%` : text(coverage)}`;
+        $("scan-help").textContent = isRunning(scan)
+          ? "Không tạo scan mới khi đang theo dõi scan này."
+          : statusKey(scan) === "completed"
+            ? "Scan đã hoàn tất thành công. Bạn có thể xem xét findings hoặc tạo lần quét mới."
+            : "Scan đã dừng. Kết quả được lưu trữ trong phiên làm việc.";
+        renderPhaseTimeline(scan);
         renderFindings(scan);
       }
 
       function renderSelections() {
-        document.querySelectorAll("[data-mode]").forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.mode === state.selectedMode)));
-        document.querySelectorAll("[data-target]").forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.target === state.selectedTarget)));
+        document.querySelectorAll("[data-mode]").forEach((button) => {
+          button.setAttribute("aria-pressed", String(button.dataset.mode === state.selectedMode));
+          button.disabled = isRunning();
+        });
+        document.querySelectorAll("[data-target]").forEach((button) => {
+          button.setAttribute("aria-pressed", String(button.dataset.target === state.selectedTarget));
+          button.disabled = isRunning() || (button.dataset.target === "changes" && !state.changesSupported);
+        });
       }
 
       function setScan(nextScan) {
@@ -545,14 +901,13 @@
         if (active && (!state.scanId || active.scanId === state.scanId || isRunning(active))) setScan(active);
         else if (!state.scan && latest) setScan(latest);
         if (Array.isArray(data.supportedTargets)) {
-          const changesButton = $("target-changes");
           const supported = data.supportedTargets.map(String).includes("changes");
-          changesButton.disabled = !supported;
+          state.changesSupported = supported;
           if (!supported && state.selectedTarget === "changes") {
             state.selectedTarget = "codebase";
-            renderSelections();
           }
         }
+        renderSelections();
         renderScan();
       }
 
@@ -586,6 +941,29 @@
       function setHostTheme(theme) {
         const value = String(theme || "").toLowerCase() === "light" ? "light" : "dark";
         document.documentElement.dataset.theme = value;
+        const toggle = $("theme-toggle");
+        if (toggle) {
+          const next = value === "dark" ? "sáng" : "tối";
+          toggle.setAttribute("aria-label", `Chuyển sang giao diện ${next}`);
+          toggle.title = `Chuyển sang giao diện ${next}`;
+        }
+      }
+
+      async function copyElementText(element, button) {
+        const value = element && element.textContent && element.textContent.trim();
+        if (!value || value === "—" || !navigator.clipboard || typeof navigator.clipboard.writeText !== "function") return;
+        try {
+          await navigator.clipboard.writeText(value);
+          const original = button.getAttribute("aria-label");
+          button.setAttribute("aria-label", "Đã sao chép");
+          button.title = "Đã sao chép";
+          setTimeout(() => {
+            button.setAttribute("aria-label", original || "Sao chép");
+            button.title = original || "Sao chép";
+          }, 1800);
+        } catch (_) {
+          // Clipboard access is optional in a sandboxed MCP iframe.
+        }
       }
 
       class McpAppsClient {
@@ -861,6 +1239,22 @@
         }
       }
 
+      function resetScan() {
+        if (state.pollTimer) clearTimeout(state.pollTimer);
+        state.requestId = null;
+        state.cancelRequestId = null;
+        state.scanId = null;
+        state.scan = null;
+        state.startBusy = false;
+        state.cancelBusy = false;
+        state.messageBusy = false;
+        state.messagePending = false;
+        state.findingFilter = "all";
+        setNotice("", false);
+        renderSelections();
+        renderScan();
+      }
+
       document.querySelectorAll("[data-mode]").forEach((button) => button.addEventListener("click", () => {
         if (!isRunning()) { state.selectedMode = button.dataset.mode; renderSelections(); }
       }));
@@ -871,6 +1265,18 @@
       $("start-scan").addEventListener("click", startScan);
       $("cancel-scan").addEventListener("click", cancelScan);
       $("retry-message").addEventListener("click", sendScanMessage);
+      $("new-scan").addEventListener("click", resetScan);
+      $("theme-toggle").addEventListener("click", () => {
+        setHostTheme(document.documentElement.dataset.theme === "light" ? "dark" : "light");
+      });
+      document.querySelectorAll("[data-finding-filter]").forEach((button) => button.addEventListener("click", () => {
+        state.findingFilter = button.dataset.findingFilter || "all";
+        renderFindings(state.scan);
+      }));
+      document.querySelectorAll("[data-copy-target]").forEach((button) => button.addEventListener("click", () => {
+        copyElementText($(button.dataset.copyTarget), button);
+      }));
+      $("copy-scan-id").addEventListener("click", () => copyElementText($("scan-id"), $("copy-scan-id")));
 
       if (window.openai && window.openai.theme) setHostTheme(window.openai.theme);
       if (window.openai && window.openai.toolOutput) applyPanelData(window.openai.toolOutput);
