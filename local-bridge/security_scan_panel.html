@@ -569,8 +569,8 @@
       function promptForStart(args) {
         return [
           "Người dùng vừa nhấn nút Bắt đầu quét trong Security MCP App.",
-          "Widget đã dispatch security_start_scan với request_id bên dưới; hãy gọi hoặc replay đúng tool với đúng arguments để lấy scanId authoritative.",
-          "Không tạo scan mới và không đổi request_id; bridge sẽ trả lại cùng scanId nếu request đã được widget xử lý.",
+          "Widget đã dispatch security_start_scan (app-only) với request_id bên dưới; model không được gọi lại security_start_scan.",
+          `Hãy gọi security_get_scan với request_id=${args.request_id} để lấy scanId authoritative; nếu còn pending thì retry cùng request_id.`,
           `security_start_scan arguments=${JSON.stringify(args)}`,
           "Ngay sau khi nhận scanId, hãy gọi security_get_scan rồi security_continue_scan và chạy toàn bộ workflow đúng phase cho tới security_complete_scan.",
           "Không dùng native Deep/Codex worker."

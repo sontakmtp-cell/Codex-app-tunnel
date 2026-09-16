@@ -913,11 +913,33 @@ class LocalBridge(ChangeJournal):
                 "updatedAt": datetime_now(),
             }
 
-    def security_get_scan(self, scan_id):
+    def security_get_scan(self, scan_id=None, request_id=None):
+        if (scan_id is None) == (request_id is None):
+            raise BridgeError("INVALID_INPUT: provide exactly one of scan_id or request_id.")
+        if request_id is not None:
+            request_key(request_id)
+            request = self._security_request_record(request_id)
+            if not request or request["operation"] != "start":
+                raise BridgeError("SECURITY_REQUEST_NOT_FOUND: widget start request is unknown.")
+            scan_id = request["scan_id"]
+            if not scan_id:
+                return {
+                    "requestId": request_id,
+                    "status": "pending",
+                    "phase": "preflight",
+                    "currentPhase": "preflight",
+                    "nextPhase": "preflight",
+                    "phaseInstructions": (
+                        "The widget is still creating the scan. Retry security_get_scan with the same request_id; "
+                        "do not call security_start_scan."
+                    ),
+                }
         scan_id = _security_scan_key(scan_id)
         with self.lock:
             fallback = self._security_scan_record(scan_id) or self._security_start_record_for_scan(scan_id)
             view, _ = self._security_authoritative(scan_id, fallback)
+            if request_id is not None:
+                view["requestId"] = request_id
             return view
 
     def security_continue_scan(self, scan_id):

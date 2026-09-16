@@ -168,7 +168,7 @@ Giữ surface nhỏ và rõ nghĩa:
 ```text
 show_security_scan_panel()
 security_start_scan(review_mode, target, user_context?, request_id)
-security_get_scan(scan_id)
+security_get_scan(scan_id? | request_id?)
 security_continue_scan(scan_id)
 security_commit_phase(scan_id, phase, <phase-specific fields>, request_id)
 security_complete_scan(scan_id, request_id)
@@ -178,6 +178,8 @@ security_export_findings(scan_id, format)
 ```
 
 Không expose trực tiếp toàn bộ native lifecycle tools ra ChatGPT.
+
+`security_start_scan` là app-only (`ui.visibility=["app"]`): model không thấy và không gọi tool này từ chat. Khi người dùng yêu cầu quét local project/folder trong chat, ChatGPT chỉ gọi `show_security_scan_panel`; sau click, model resolve request bằng `security_get_scan(request_id=...)`.
 
 ### `security_start_scan`
 
@@ -380,24 +382,21 @@ Status, findings, progress, completion luôn đọc lại từ Security MCP.
 2. Trong cùng lượt click, trước khi chờ response nào, widget dispatch song song:
    - `tools/call` → `security_start_scan` với bộ arguments đó;
    - `ui/message` với đúng `request_id` và bộ arguments đó.
-3. ChatGPT Web tự gọi/replay `security_start_scan` bằng đúng arguments; idempotency của bridge trả cùng `scanId` với request của widget.
-4. Widget nhận `structuredContent.scanId` và lưu `scanId/requestId` chỉ để phục vụ UI hiện tại.
-5. ChatGPT nhận `scanId` từ kết quả `security_start_scan`, không cần người dùng gõ thêm lệnh.
-6. ChatGPT Web gọi `security_get_scan(scanId)`.
-7. ChatGPT gọi `security_continue_scan(scanId)` để lấy `nextPhase`.
-8. ChatGPT thực hiện phase theo workflow contract.
-9. ChatGPT checkpoint bằng `security_commit_phase(...)`.
-10. Lặp continue → work → commit cho tới finalization.
-11. ChatGPT gọi `security_complete_scan(scanId)`.
+3. `security_start_scan` là app-only; widget nhận `structuredContent.scanId` và lưu `scanId/requestId` cho UI.
+4. ChatGPT không gọi/replay `security_start_scan`; ChatGPT dùng `security_get_scan(request_id)` để lấy cùng `scanId` authoritative từ request của widget.
+5. ChatGPT gọi `security_continue_scan(scanId)` để lấy `nextPhase`.
+6. ChatGPT thực hiện phase theo workflow contract.
+7. ChatGPT checkpoint bằng `security_commit_phase(...)`.
+8. Lặp continue → work → commit cho tới finalization.
+9. ChatGPT gọi `security_complete_scan(scanId)`.
 ```
 
 Nội dung `ui/message` phải được dispatch đồng bộ với cú click và có dạng tương đương:
 
 ```text
 Người dùng vừa nhấn nút Bắt đầu quét trong Security MCP App.
-Widget đã dispatch security_start_scan với request_id=<request_id>.
-Hãy gọi/replay security_start_scan đúng arguments đó để lấy scanId authoritative; không tạo scan mới.
-Sau khi nhận scanId, hãy đọc security_get_scan/security_continue_scan và tuân thủ workflow phase của bridge tới security_complete_scan.
+Widget đã dispatch app-only security_start_scan với request_id=<request_id>.
+Không gọi security_start_scan từ model. Hãy gọi security_get_scan(request_id=<request_id>), retry nếu còn pending, rồi tuân thủ workflow phase của bridge tới security_complete_scan.
 Không dùng native Deep/Codex worker.
 ```
 
@@ -491,6 +490,7 @@ Cancel phải idempotent: gọi lại cùng request không tạo side effect m�
 - Widget xuất hiện trong ChatGPT App iframe.
 - `control-panel-v2` local vẫn hoạt động độc lập.
 - Bấm Standard và ChatGPT Deep đều gọi đúng `security_start_scan`.
+- `security_start_scan` chỉ callable từ widget sau click; model/chat không được gọi trực tiếp.
 - Nút widget dispatch `security_start_scan` và `ui/message` trong cùng lượt click; `request_id`/arguments khớp tuyệt đối.
 - ChatGPT tự tiếp tục từ kết quả `security_start_scan`; người dùng không cần gửi thêm lệnh trong chat.
 - Polling cập nhật đúng authoritative scan.
@@ -502,8 +502,8 @@ Cancel phải idempotent: gọi lại cùng request không tạo side effect m�
 
 - Refresh app sau khi đổi tool/resource.
 - Nếu host vẫn giữ resource hoặc behavior cũ sau khi refresh, remove/reinstall plugin MCP Bridge local trong ChatGPT Web, mở lại chat/widget rồi kiểm tra lại; đây là bước loại cache plugin/host, không thay đổi kiến trúc MCP.
-- Text command “quét Security Standard” gọi đúng `review_mode=standard`.
-- Text command “phân tích bằng ChatGPT Deep” gọi đúng `review_mode=chatgpt_deep`.
+- Text request “quét bảo mật thư mục local” chỉ gọi `show_security_scan_panel`; không gọi `security_start_scan` trước khi người dùng bấm nút.
+- Sau khi người dùng bấm nút trong widget, `security_start_scan` được gọi app-only và ChatGPT dùng `security_get_scan(request_id=...)` để lấy scanId.
 - Nút widget gửi message vào đúng phiên chat.
 - ChatGPT tiếp tục dùng đúng `scanId`.
 - ChatGPT gọi `security_continue_scan`/`security_commit_phase` theo workflow contract.

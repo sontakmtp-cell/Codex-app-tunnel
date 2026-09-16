@@ -230,6 +230,24 @@ class SecurityBridgeTests(unittest.TestCase):
             changes_bridge.close()
         self.assertEqual(self.runtime.calls, [])
 
+    def test_widget_request_id_resolves_authoritative_scan(self):
+        started = self.bridge.security_start_scan("standard", "codebase", request_id="widget-start-001")
+        resolved = self.bridge.security_get_scan(request_id="widget-start-001")
+        self.assertEqual(resolved["scanId"], started["scanId"])
+        self.assertEqual(resolved["requestId"], "widget-start-001")
+        self.bridge.db.execute(
+            "UPDATE security_requests SET scan_id=NULL,status='pending' WHERE request_id=?",
+            ("widget-start-001",),
+        )
+        self.bridge.db.commit()
+        pending = self.bridge.security_get_scan(request_id="widget-start-001")
+        self.assertEqual(pending["status"], "pending")
+        self.assertIn("do not call security_start_scan", pending["phaseInstructions"])
+        with self.assertRaisesRegex(BridgeError, "exactly one"):
+            self.bridge.security_get_scan()
+        with self.assertRaisesRegex(BridgeError, "exactly one"):
+            self.bridge.security_get_scan(started["scanId"], "widget-start-001")
+
     def test_safe_findings_export_panel_and_terminal_cancel_idempotency(self):
         started = self.bridge.security_start_scan("standard", "codebase", request_id="safe-001")
         findings = self.bridge.security_list_findings(started["scanId"])

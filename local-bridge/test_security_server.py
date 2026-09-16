@@ -149,6 +149,14 @@ class SecurityServerTests(unittest.TestCase):
         )
         self.assertEqual(start_schema["properties"]["target"]["enum"], ["codebase", "changes"])
         self.assertEqual(set(start_schema["required"]), {"review_mode", "target", "request_id"})
+        self.assertEqual(by_name["security_start_scan"].meta["ui"]["visibility"], ["app"])
+        self.assertEqual(by_name["show_security_scan_panel"].meta["ui"]["visibility"], ["model", "app"])
+        self.assertIn("only shows the chooser", by_name["show_security_scan_panel"].description)
+        self.assertIn("Never call it directly", by_name["security_start_scan"].description)
+
+        get_schema = by_name["security_get_scan"].input_schema
+        self.assertEqual(set(get_schema["properties"]), {"scan_id", "request_id"})
+        self.assertNotIn("required", get_schema)
 
         commit_schema = by_name["security_commit_phase"].input_schema
         request_schema = commit_schema["properties"]["request"]

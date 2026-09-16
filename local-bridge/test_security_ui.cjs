@@ -23,6 +23,8 @@ function staticContract() {
   mustMatch(/security_cancel_scan/, 'cancels the same scan');
   mustMatch(/show_security_scan_panel/, 'reopens from authoritative panel state');
   mustMatch(/promptForStart/, 'button has an automatic workflow trigger');
+  mustMatch(/security_get_scan với request_id=/, 'automatic trigger resolves the app-only start');
+  mustMatch(/app-only/, 'automatic trigger marks start as app-only');
   mustMatch(/const startPromise = client\.callTool\("security_start_scan"/, 'dispatches start without awaiting first');
   mustMatch(/messagePromise = client\.sendMessage\(promptForStart\(args\)\)/, 'dispatches the trigger in the click activation');
   mustMatch(/window\.openai\.sendFollowUpMessage\(\{ prompt: promptForStart\(args\)/, 'calls ChatGPT compatibility directly from the click stack');

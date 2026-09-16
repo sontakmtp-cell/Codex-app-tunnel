@@ -18,7 +18,7 @@ Trong ChatGPT, dùng app **Codex app** đã kết nối. Sau khi thay đổi dan
 
 ## Security MCP V1
 
-Security widget dùng resource riêng `ui://local-bridge/security-scan-v1.html`; nó không thay thế và không chia sẻ trạng thái presentation với `control-panel-v2`. Khi người dùng bấm `Bắt đầu quét`, widget dispatch request của Security và message vào đúng phiên ChatGPT trong cùng lượt click; ChatGPT Web tự tiếp tục workflow, không cần người dùng gửi thêm lệnh trong chat.
+Security widget dùng resource riêng `ui://local-bridge/security-scan-v1.html`; nó không thay thế và không chia sẻ trạng thái presentation với `control-panel-v2`. Khi người dùng chat và yêu cầu quét project/thư mục local, ChatGPT chỉ mở widget để người dùng chọn; không được tự gọi start. Khi người dùng bấm `Bắt đầu quét`, widget dispatch request của Security và message vào đúng phiên ChatGPT trong cùng lượt click; ChatGPT Web tự tiếp tục workflow, không cần người dùng gửi thêm lệnh trong chat. Tool `security_start_scan` chỉ hiển thị cho app, không hiển thị cho model.
 
 V1 chỉ quảng bá `standard` và `chatgpt_deep`. Cả hai mode đều dùng ChatGPT Web để reasoning, không tạo Codex worker, không gọi native Deep và không expose `native_deep`, `model` hoặc `reasoningEffort` ra giao diện/tool contract.
 

@@ -60,18 +60,19 @@ Khi doctor đạt, vào Settings → Apps → Codex app → Làm mới để hos
 | Gate | Kết quả và bằng chứng |
 |---|---|
 | 1 — Direct MCP | **Đạt local:** adapter chạy `codex-security` trực tiếp bằng bundled Node/STDIO, allowlist cố định, môi trường sạch, không model/native deep; direct adapter tests và probe thật xác nhận start/get/cancel. |
-| 2 — Bridge contract | **Đạt local:** đúng 9 Security facade tools; schema không lộ `native_deep`, native lifecycle, `reasoningEffort` hay worker; restart STDIO trả lại cùng `scanId`, conflict/terminal guard/idempotency đã test. |
+| 2 — Bridge contract | **Đạt local:** đúng 9 Security facade tools; schema không lộ `native_deep`, native lifecycle, `reasoningEffort` hay worker; `security_start_scan` là app-only, model không thấy tool này; ChatGPT có thể resolve scan sau click bằng `security_get_scan(request_id=...)`; restart STDIO trả lại cùng `scanId`, conflict/terminal guard/idempotency đã test. |
 | 3 — Workflow | **Đạt local/native:** standard chạy đủ 7 checkpoint → complete; `chatgpt_deep` chạy đủ 10 checkpoint → complete. Probe restart thật giữ nguyên `scanId`, phase đã commit không chạy lại và tiếp tục đúng `nextPhase`. Hai mode có phase sequence typed, resume/checkpoint/terminal guard và không tạo Codex worker. Adapter tự claim/deliver handoff nội bộ bằng token bền vững; các pass Deep của ChatGPT chỉ dùng progress `review_receipts` trên native app-only standard session, không gửi `deepReviewPass`/native Deep. |
 | 4 — Widget | **Đạt local + host retest:** `security-scan-v1` là resource riêng, MCP Apps `tools/call`/`ui/message` trước fallback, retry message không tạo scan thứ hai, cancel giữ nguyên `scanId`; Playwright security widget và `control-panel-v2` đều pass. |
-| 5 — ChatGPT Web thật | **Đạt:** sau khi restart tunnel và làm mới resource, widget đã chạy Standard qua `scanId=ad009b3f-eb9d-4cb6-878e-2397f49c3fa2` tới `completed` theo `threat_model → discovery → validation → attack_path → finalization → complete`. Text command `Phân tích bằng ChatGPT Deep` và nút `ChatGPT Deep` đã chạy scan `e4746214-5a60-413b-8e27-293ca9a2b350` tới `completed` theo đủ `preflight → inventory → threat_model → Pass 1 → Pass 2 → Pass 3 → deduplicate → validation → attack_path → finalization → complete`. Cả hai đều dùng đúng scanId, không tạo native Deep/Codex worker, 0 finding hợp lệ. Trong lần retest thủ công ngày 2026-09-16, sau khi gỡ và cài lại plugin MCP Bridge local, bấm `Bắt đầu quét` đã tự động chạy workflow ngay, không cần gửi thêm lệnh trong chat. `healthz/readyz` không được dùng thay cho bằng chứng này. Target live là `H:/AI/New folder` (12 file tài liệu/log, không phải source của bridge), nên đây là bằng chứng connector/workflow end-to-end, không phải security audit của `H:/AI/Codex-app-tunnel`. |
+| 5 — ChatGPT Web thật | **Đạt:** sau khi restart tunnel và làm mới resource, widget đã chạy Standard qua `scanId=ad009b3f-eb9d-4cb6-878e-2397f49c3fa2` tới `completed` theo `threat_model → discovery → validation → attack_path → finalization → complete`. Bằng chứng lịch sử trước khi áp dụng chat-to-panel routing: text command `Phân tích bằng ChatGPT Deep` và nút `ChatGPT Deep` đã chạy scan `e4746214-5a60-413b-8e27-293ca9a2b350` tới `completed` theo đủ `preflight → inventory → threat_model → Pass 1 → Pass 2 → Pass 3 → deduplicate → validation → attack_path → finalization → complete`. Cả hai đều dùng đúng scanId, không tạo native Deep/Codex worker, 0 finding hợp lệ. Trong lần retest thủ công ngày 2026-09-16, sau khi gỡ và cài lại plugin MCP Bridge local, bấm `Bắt đầu quét` đã tự động chạy workflow ngay, không cần gửi thêm lệnh trong chat. `healthz/readyz` không được dùng thay cho bằng chứng này. Target live là `H:/AI/New folder` (12 file tài liệu/log, không phải source của bridge), nên đây là bằng chứng connector/workflow end-to-end, không phải security audit của `H:/AI/Codex-app-tunnel`. |
 
 ### Reverification 2026-09-16
 
-- Full Python suite bằng runtime của tunnel: **44/44 tests passed**.
+- Full Python suite bằng runtime của tunnel: **45/45 tests passed**.
 - `test_security_ui.cjs`: **PASS** (Playwright DOM/MCP host loop).
 - `test_ui.cjs`: **PASS** (`control-panel-v2` UI/MCP integration).
 - `git diff --check`: **PASS**.
 - Retest ChatGPT Web sau khi gỡ/cài lại plugin MCP Bridge local xác nhận nút `Bắt đầu quét` tự khởi động scan và workflow, không cần message thứ hai.
+- Retest routing: yêu cầu quét từ chat chỉ mở chooser; scan không bắt đầu trước khi người dùng bấm `Bắt đầu quét`.
 
 ### Khôi phục cache của ChatGPT Web
 
