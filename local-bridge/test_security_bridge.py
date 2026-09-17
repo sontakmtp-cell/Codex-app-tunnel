@@ -111,6 +111,12 @@ class DirectSecurityAdapter:
                     "severity": "high",
                     "description": "token=private-token and /private/path must be hidden",
                     "file": str(self.root / "src" / "app.py"),
+                    "locations": [
+                        {"path": str(self.root / "src" / "app.py"), "startLine": 91, "endLine": 104,
+                         "role": "root_control"},
+                        {"path": str(self.root / "src" / "config.py"), "startLine": 22,
+                         "role": "expected_control"},
+                    ],
                     "token": "private-token",
                 }],
                 "nextOffset": 1,
@@ -134,6 +140,18 @@ class DirectSecurityAdapter:
                 "workspaceRoot": str(self.root),
                 "gitRepository": False,
             },
+        }
+
+
+class ZeroFindingSecurityAdapter(DirectSecurityAdapter):
+    def list_findings(self, scan_id, cursor, limit):
+        self.calls.append(("list_findings", cursor, limit))
+        return {
+            "structuredContent": {"findingsPage": {
+                "findings": [],
+                "nextOffset": None,
+                "total": 0,
+            }},
         }
 
 
@@ -180,13 +198,30 @@ class SecurityBridgeTests(unittest.TestCase):
             "discovery": {"candidates": [], "coverage": {"files": 1}},
             "validation": {"validations": [], "coverage": {"validated": 0}},
             "attack_path": {"attackPaths": [], "coverage": {"paths": 0}},
-            "finalization": {"findings": [], "coverage": {"complete": True}},
         }
         phase = "preflight"
-        for index, (phase, fields) in enumerate(phase_data.items(), start=1):
-            view = self.bridge.security_commit_phase("scan-0001", phase, request_id=f"phase-{index:03d}", **fields)
+        for phase, fields in phase_data.items():
+            view = self.bridge.security_commit_phase("scan-0001", phase, request_id="phase-reused", **fields)
             self.assertEqual(view["scanId"], "scan-0001")
         self.assertEqual(view["phase"], "finalization")
+
+        with self.assertRaisesRegex(BridgeError, "findings must be a list"):
+            self.bridge.security_commit_phase(
+                "scan-0001",
+                "finalization",
+                request_id="empty-finalization",
+                coverage={"completeness": "partial", "deferred": [{"id": "F1"}]},
+            )
+        with self.assertRaisesRegex(BridgeError, "SECURITY_FINALIZATION_REQUIRED"):
+            self.bridge.security_complete_scan("scan-0001", "complete-before-finalization")
+
+        self.bridge.security_commit_phase(
+            "scan-0001",
+            "finalization",
+            request_id="phase-reused",
+            findings=[],
+            coverage={"complete": True},
+        )
         completed = self.bridge.security_complete_scan("scan-0001", "complete-001")
         self.assertEqual(completed["status"], "completed")
         self.assertEqual(completed["phase"], "complete")
@@ -194,6 +229,47 @@ class SecurityBridgeTests(unittest.TestCase):
         with self.assertRaisesRegex(BridgeError, "SECURITY_TERMINAL"):
             self.bridge.security_commit_phase("scan-0001", "finalization", request_id="late-001",
                                               findings=[], coverage={})
+
+    def test_chatgpt_deep_scan_can_complete_with_zero_findings(self):
+        adapter = ZeroFindingSecurityAdapter(self.root)
+        bridge = self.new_bridge("zero-findings-state", adapter)
+        try:
+            started = bridge.security_start_scan(
+                "chatgpt_deep", "codebase", user_context="deep", request_id="zero-start-001"
+            )
+            phase_data = {
+                "preflight": {"coverage": {"files": 1}},
+                "inventory": {"inventory": [{"path": "src/app.py"}], "coverage": {"files": 1}},
+                "threat_model": {"threatModel": {"threats": []}},
+                "attack_surface": {"candidates": [], "coverage": {"surfaces": []}},
+                "auth_data_flow": {"candidates": [], "coverage": {"surfaces": []}},
+                "injection_file_process_network_state": {"candidates": [], "coverage": {"surfaces": []}},
+                "deduplicate": {"candidates": [], "coverage": {"deduplicated": 0}},
+                "validation": {"validations": [], "coverage": {"validated": 0}},
+                "attack_path": {"attackPaths": [], "coverage": {"paths": 0}},
+            }
+            for index, (phase, fields) in enumerate(phase_data.items(), start=1):
+                bridge.security_commit_phase(
+                    started["scanId"], phase, request_id=f"zero-phase-{index}", **fields
+                )
+
+            finalized = bridge.security_commit_phase(
+                started["scanId"], "finalization", request_id="zero-finalization-001", findings=[]
+            )
+            self.assertEqual(finalized["phase"], "finalization")
+            self.assertEqual(finalized["nextPhase"], "complete")
+
+            state = bridge.security_get_scan(started["scanId"])
+            self.assertEqual(state["nextPhase"], "complete")
+            completed = bridge.security_complete_scan(started["scanId"], "zero-complete-001")
+            self.assertEqual(completed["status"], "completed")
+            self.assertEqual(completed["phase"], "complete")
+
+            findings = bridge.security_list_findings(started["scanId"])
+            self.assertEqual(findings["total"], 0)
+            self.assertEqual(findings["findings"], [])
+        finally:
+            bridge.close()
 
     def test_restart_retry_is_atomic_and_payload_conflict_is_rejected(self):
         first = self.bridge.security_start_scan("standard", "codebase", "same context", "restart-001")
@@ -252,6 +328,8 @@ class SecurityBridgeTests(unittest.TestCase):
         started = self.bridge.security_start_scan("standard", "codebase", request_id="safe-001")
         findings = self.bridge.security_list_findings(started["scanId"])
         self.assertEqual(findings["findings"][0]["file"], "src/app.py")
+        self.assertEqual(findings["findings"][0]["startLine"], 91)
+        self.assertEqual(findings["findings"][0]["locations"][1]["file"], "src/config.py")
         self.assertNotIn("private-token", json.dumps(findings).lower())
         exported = self.bridge.security_export_findings(started["scanId"], "json")
         self.assertNotIn("private-token", json.dumps(exported))

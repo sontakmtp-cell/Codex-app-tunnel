@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import subprocess
 import threading
@@ -996,6 +997,182 @@ class SecurityMcpAdapter:
         return {"completeness": "partial", "surfaces": [], "explicitExclusions": [], "deferred": []}
 
     @staticmethod
+    def _native_text(value: Any, fallback: str) -> str:
+        return value.strip()[:12000] if isinstance(value, str) and value.strip() else fallback
+
+    @staticmethod
+    def _native_slug(value: Any, fallback: str = "security-finding") -> str:
+        text = value.strip().casefold() if isinstance(value, str) else ""
+        slug = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+        return (slug or fallback)[:160]
+
+    def _native_repo_path(self, value: Any) -> str | None:
+        if not isinstance(value, str) or not value.strip():
+            return None
+        text = value.strip().replace("\\", "/")
+        candidate = Path(text)
+        if candidate.is_absolute():
+            try:
+                text = candidate.resolve().relative_to(self.scan_root).as_posix()
+            except (OSError, ValueError):
+                return None
+        while text.startswith("./"):
+            text = text[2:]
+        parts = text.split("/")
+        if not text or any(part in {"", ".", ".."} for part in parts):
+            return None
+        return text[:1000]
+
+    def _native_finding_locations(self, finding: Mapping[str, Any]) -> list[dict[str, Any]]:
+        raw_locations = None
+        explicit_locations = False
+        for key in (
+            "locations", "sourceLocations", "source_locations", "sourceAnchors", "source_anchors",
+            "evidenceLocations", "evidence_locations", "codeEvidence", "code_evidence",
+            "sourceEvidence", "source_evidence",
+        ):
+            candidate = finding.get(key)
+            if isinstance(candidate, list) and candidate:
+                raw_locations = candidate
+                explicit_locations = True
+                break
+        if raw_locations is None:
+            for key in ("evidence", "sourceEvidence", "source_evidence", "codeEvidence", "code_evidence"):
+                candidate = finding.get(key)
+                if isinstance(candidate, Mapping):
+                    raw_locations = [candidate]
+                    explicit_locations = True
+                    break
+        if not isinstance(raw_locations, list) or not raw_locations:
+            raw_locations = finding.get("paths")
+            if isinstance(raw_locations, str):
+                raw_locations = [raw_locations]
+            if not isinstance(raw_locations, list) or not raw_locations:
+                raw_locations = [finding.get("path") or finding.get("file") or finding.get("location")]
+
+        locations = []
+        for raw in raw_locations:
+            item = dict(raw) if isinstance(raw, Mapping) else {"path": raw}
+            path = self._native_repo_path(item.get("path") or item.get("file") or finding.get("path") or finding.get("file"))
+            if not path:
+                continue
+            location = {"path": path, "role": self._native_text(item.get("role"), "root_control")}
+            line_value = next((item.get(key) for key in ("startLine", "start_line", "line", "lineNumber", "line_number")
+                               if item.get(key) is not None), None)
+            if line_value is None and not explicit_locations:
+                line_value = next((finding.get(key) for key in ("startLine", "start_line", "line", "lineNumber", "line_number")
+                                   if finding.get(key) is not None), None)
+            try:
+                if isinstance(line_value, bool):
+                    raise ValueError
+                line = int(line_value)
+                if line <= 0:
+                    raise ValueError
+            except (TypeError, ValueError):
+                line = None
+            if line is not None:
+                location["startLine"] = line
+            end_value = next((item.get(key) for key in ("endLine", "end_line") if item.get(key) is not None), None)
+            if end_value is None:
+                end_value = next((finding.get(key) for key in ("endLine", "end_line") if finding.get(key) is not None), None)
+            try:
+                if line is not None and end_value is not None and not isinstance(end_value, bool):
+                    end_line = max(line, int(end_value))
+                    location["endLine"] = end_line
+            except (TypeError, ValueError):
+                pass
+            locations.append(location)
+        if not locations:
+            raise SecurityMcpError("SECURITY_FINDING_INVALID: finding needs a project-relative location.")
+        return locations[:50]
+
+    def _native_finding(self, finding: Mapping[str, Any]) -> dict[str, Any]:
+        source = dict(finding)
+        title = self._native_text(source.get("title") or source.get("name"), "Untitled security finding")
+        summary = self._native_text(
+            source.get("summary") or source.get("description") or source.get("evidence"),
+            title,
+        )
+
+        raw_severity = source.get("severity")
+        severity = dict(raw_severity) if isinstance(raw_severity, Mapping) else {}
+        severity_level = raw_severity.get("level") if isinstance(raw_severity, Mapping) else raw_severity
+        severity_level = str(severity_level or "medium").casefold()
+        severity["level"] = {"info": "informational", "moderate": "medium"}.get(severity_level, severity_level)
+        if severity["level"] not in {"critical", "high", "medium", "low", "informational"}:
+            severity["level"] = "medium"
+
+        raw_confidence = source.get("confidence")
+        confidence = dict(raw_confidence) if isinstance(raw_confidence, Mapping) else {}
+        confidence_level = raw_confidence.get("level") if isinstance(raw_confidence, Mapping) else raw_confidence
+        confidence["level"] = str(confidence_level or "medium").casefold()
+        if confidence["level"] not in {"high", "medium", "low"}:
+            confidence["level"] = "medium"
+        confidence["rationale"] = self._native_text(
+            confidence.get("rationale"),
+            "Confidence assigned from the validated Security review evidence.",
+        )
+
+        raw_taxonomy = source.get("taxonomy")
+        taxonomy = dict(raw_taxonomy) if isinstance(raw_taxonomy, Mapping) else {}
+        taxonomy["category"] = self._native_text(
+            taxonomy.get("category") or source.get("category") or source.get("type") or source.get("rule"),
+            title,
+        )
+        cwe = taxonomy.get("cwe", source.get("cwe", source.get("cwe_ids", [])))
+        if isinstance(cwe, str):
+            cwe = [cwe]
+        taxonomy["cwe"] = [value.strip()[:200] for value in cwe if isinstance(value, str) and value.strip()] if isinstance(cwe, list) else []
+
+        rule_id = self._native_slug(
+            source.get("ruleId") or source.get("rule_id") or source.get("rule") or source.get("category") or title
+        )
+        remediation = self._native_text(
+            source.get("remediation") or source.get("fix") or source.get("recommendation"),
+            "Apply the minimal fix for the affected security control and add a regression test.",
+        )
+        provenance = dict(source.get("provenance")) if isinstance(source.get("provenance"), Mapping) else {}
+        provenance["source"] = self._native_text(provenance.get("source"), "chatgpt_web")
+        source_id = source.get("id") or source.get("findingId") or source.get("candidateId")
+        source_ids = provenance.get("sourceFindingIds")
+        if isinstance(source_ids, str):
+            source_ids = [source_ids]
+        if not isinstance(source_ids, list):
+            source_ids = []
+        if source_id and not source_ids:
+            source_ids = [str(source_id)[:512]]
+        if source_ids:
+            provenance["sourceFindingIds"] = [str(value)[:512] for value in source_ids if str(value).strip()]
+
+        identity = dict(source.get("identity")) if isinstance(source.get("identity"), Mapping) else {}
+        identity["anchor"] = self._native_slug(identity.get("anchor") or rule_id)
+
+        normalized = dict(source)
+        normalized.update({
+            "ruleId": rule_id,
+            "identity": identity,
+            "title": title,
+            "summary": summary,
+            "severity": severity,
+            "confidence": confidence,
+            "taxonomy": taxonomy,
+            "locations": self._native_finding_locations(source),
+            "remediation": remediation,
+            "provenance": provenance,
+        })
+        return normalized
+
+    def _native_findings(self, findings: Any) -> list[dict[str, Any]]:
+        if not isinstance(findings, list):
+            raise SecurityMcpError("SECURITY_FINDING_INVALID: findings must be a list.")
+        normalized = []
+        for finding in findings:
+            if not isinstance(finding, Mapping):
+                raise SecurityMcpError("SECURITY_FINDING_INVALID: each finding must be an object.")
+            normalized.append(self._native_finding(finding))
+        return normalized
+
+    @staticmethod
     def _native_threat_model(value: Mapping[str, Any]) -> dict[str, Any]:
         """Normalize ChatGPT's common snake_case model into native draft text."""
         model = dict(value)
@@ -1038,6 +1215,8 @@ class SecurityMcpAdapter:
         handoff_token = self._scan_handoff_token(scan_id)
         coverage = data.get("coverage")
         coverage = dict(coverage) if isinstance(coverage, Mapping) else self._empty_coverage()
+        if coverage.get("complete") is True and "completeness" not in coverage:
+            coverage["completeness"] = "complete"
         for key, default in (("completeness", "partial"), ("surfaces", []),
                               ("explicitExclusions", []), ("deferred", [])):
             coverage.setdefault(key, default)
@@ -1057,7 +1236,7 @@ class SecurityMcpAdapter:
         draft: dict[str, Any] = {
             "scanId": scan_id,
             "complete": phase == "finalization",
-            "findings": data.get("findings", []),
+            "findings": self._native_findings(data.get("findings", [])),
             "coverage": coverage,
         }
         if handoff_token:

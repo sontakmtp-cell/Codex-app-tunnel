@@ -20,8 +20,9 @@ class TaskRunner:
         runtime.listeners.append(self._event)
 
     def list_tasks(self):
+        available = self.runtime.can_execute
         return {"tasks": [{"task_id": name, "command": list(argv)} for name, argv in self.owner.config.tasks.items()],
-                "available": self.runtime.can_execute, "unavailable_reason": self.runtime.command_error,
+                "available": available, "unavailable_reason": None if available else (self.runtime.command_error or None),
                 "active_run_id": self.owner.active_run}
 
     def _command(self, task_id):

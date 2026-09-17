@@ -98,6 +98,27 @@ class BridgeTests(unittest.TestCase):
         self.assertFalse((self.root/"xin chao.txt").exists())
         self.assertEqual((self.root/"unrelated.txt").read_bytes(),b"keep me")
 
+    def test_prepare_changes_preserves_existing_line_endings(self):
+        lf=b"one\nneedle\nthree\n"
+        crlf=b"one\r\nneedle\r\nthree\r\n"
+        (self.root/"lf.txt").write_bytes(lf)
+        (self.root/"crlf.txt").write_bytes(crlf)
+        change=self.change([
+            {"path":"lf.txt","content":"one\r\nchanged\r\nthree\r\n","expected_sha256":_sha256(lf)},
+            {"path":"crlf.txt","content":"one\nchanged\nthree\n","expected_sha256":_sha256(crlf)},
+        ],"line-endings-001")
+        self.b.apply_changes(change,"line-endings-apply-001")
+        self.assertEqual((self.root/"lf.txt").read_bytes(),b"one\nchanged\nthree\n")
+        self.assertEqual((self.root/"crlf.txt").read_bytes(),b"one\r\nchanged\r\nthree\r\n")
+        (self.root/"patch.txt").write_bytes(lf)
+        self.b.apply_patch("patch.txt","needle\r\n","patched\r\n",_sha256(lf))
+        self.assertEqual((self.root/"patch.txt").read_bytes(),b"one\npatched\nthree\n")
+        (self.root/"write.txt").write_bytes(crlf)
+        written=self.b.write_file("write.txt","one\ntwo\n",_sha256(crlf))
+        self.assertEqual((self.root/"write.txt").read_bytes(),b"one\r\ntwo\r\n")
+        self.assertEqual(written["sha256"],_sha256(b"one\r\ntwo\r\n"))
+        self.assertEqual(written["bytes_written"],len(b"one\r\ntwo\r\n"))
+
     def test_sha_conflict_refuses_whole_batch(self):
         for name in ("a.txt","b.txt"):(self.root/name).write_bytes(b"old")
         c=self.change([{"path":n,"content":"new","expected_sha256":_sha256(b"old")} for n in ("a.txt","b.txt")])
@@ -305,6 +326,19 @@ class BridgeTests(unittest.TestCase):
         with self.assertRaisesRegex(BridgeError, "TURBO_REQUIRED"):
             self.b.run_bash("printf blocked")
 
+    def test_project_info_hides_stale_command_error_when_capability_recovers(self):
+        self.runtime.command_ready=False
+        self.runtime.command_error="Windows refused the protected process."
+        failed=self.b.project_info()
+        self.assertFalse(failed["runtime"]["commands_enabled"])
+        self.assertEqual(failed["runtime"]["command_error"],self.runtime.command_error)
+        self.b.set_runtime_mode("turbo",True)
+        recovered=self.b.project_info()
+        self.assertTrue(recovered["runtime"]["commands_enabled"])
+        self.assertTrue(recovered["runtime"]["bash_enabled"])
+        self.assertIsNone(recovered["runtime"]["command_error"])
+        self.assertIsNone(self.b.tasks.list_tasks()["unavailable_reason"])
+
     def test_app_server_uses_separate_normal_and_turbo_command_policy(self):
         runtime=AppServer(self.root,self.home/"state-policy")
         runtime.status="connected"
@@ -380,6 +414,25 @@ class BridgeTests(unittest.TestCase):
         diff=self.b.git_diff()["diff"]
         self.assertIn("new",diff);self.assertNotIn("PRIVATE",diff)
         self.assertEqual((self.root/".git/index").read_bytes(),index)
+
+    def test_git_diff_check_accepts_crlf_but_rejects_real_trailing_whitespace(self):
+        def git(*args):
+            return subprocess.run([shutil.which("git"),*args],cwd=self.root,capture_output=True,check=True)
+        checker=Path(__file__).with_name("git_diff_check.py")
+        def check():
+            return subprocess.run([sys.executable,str(checker)],cwd=self.root,capture_output=True)
+        git("init")
+        path=self.root/"line-endings.txt"
+        path.write_bytes(b"one\r\n")
+        git("add","line-endings.txt")
+        path.write_bytes(b"two\r\n")
+        self.assertEqual(check().returncode,0)
+        path.write_bytes(b"two   \r\n")
+        result=check()
+        self.assertNotEqual(result.returncode,0)
+        self.assertIn(b"trailing whitespace",result.stdout+result.stderr)
+        path.write_bytes(b"two\n")
+        self.assertEqual(check().returncode,0)
 
     def test_scoped_history_skill_docs_and_no_model_api(self):
         with self.assertRaisesRegex(BridgeError,"SCOPE_DENIED"):self.b.read_codex_thread("outside")

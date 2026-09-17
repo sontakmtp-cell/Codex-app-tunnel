@@ -8,7 +8,8 @@ from files import BLOCKED_DIRECTORIES, BLOCKED_SUFFIXES, SECRET_NAMES, SECRET_PR
 
 
 GIT = ["git", "--no-optional-locks", "-c", "core.fsmonitor=false",
-       "-c", "core.hooksPath=" + os.devnull, "-c", "core.pager=cat"]
+       "-c", "core.hooksPath=" + os.devnull, "-c", "core.pager=cat",
+       "-c", "core.whitespace=cr-at-eol"]
 
 
 def blocked(path):

@@ -20,6 +20,7 @@ function staticContract() {
   mustMatch(/sendFollowUpMessage/, 'has follow-up compatibility fallback');
   mustMatch(/security_start_scan/, 'starts a Security scan');
   mustMatch(/security_get_scan/, 'polls authoritative scan state');
+  mustMatch(/security_list_findings/, 'loads authoritative finding details');
   mustMatch(/security_cancel_scan/, 'cancels the same scan');
   mustMatch(/show_security_scan_panel/, 'reopens from authoritative panel state');
   mustMatch(/promptForStart/, 'button has an automatic workflow trigger');
@@ -98,6 +99,20 @@ async function browserContract() {
       wireEvents.push('start-response');
       return { structuredContent: scan };
     }
+    if (name === 'security_list_findings') {
+      return {
+        structuredContent: {
+          scanId: scan && scan.scanId,
+          findings: [
+            { id: 'F1', title: 'Unsafe fallback JWT signing secret', severity: 'critical', file: 'api/config.py', line: 12, description: 'Fallback secret is used for signing.' },
+            { id: 'F2', title: 'Auth cookies default to non-Secure', severity: 'high', file: 'api/routes/auth.py', line: 44, description: 'Cookie security depends on an opt-in flag.' },
+            { id: 'F3', title: 'Broad credentialed CORS trust', severity: 'medium', file: 'api/main.py', line: 31, description: 'Credentials are accepted for broad subdomains.' },
+            { id: 'F4', title: 'Billing error disclosure', severity: 'medium', file: 'api/routes/billing.py', line: 88, description: 'Internal error details reach the client.' }
+          ],
+          total: 4
+        }
+      };
+    }
     if (name === 'security_get_scan') return { structuredContent: scan };
     if (name === 'security_cancel_scan') {
       scan = { ...scan, status: 'cancelled', updatedAt: new Date().toISOString() };
@@ -128,6 +143,7 @@ async function browserContract() {
     await frame.getByText('demo-repo', { exact: true }).waitFor();
     await frame.getByRole('button', { name: 'Bắt đầu quét', exact: true }).click();
     await frame.getByText('scan-1', { exact: true }).waitFor();
+    await frame.locator('#finding-count-badge').getByText('4', { exact: true }).waitFor();
     try {
       await frame.getByText('Đã gửi lệnh tự động; ChatGPT đang tiếp tục scanId=scan-1.', { exact: true }).waitFor({ timeout: 5000 });
     } catch (error) {
@@ -137,6 +153,7 @@ async function browserContract() {
     assert.equal(started.length, 1, 'one start call');
     assert.equal(started[0].review_mode, 'standard');
     assert.equal(started[0].target, 'codebase');
+    assert.ok(calls.some((call) => call.method === 'tools/call' && call.params.name === 'security_list_findings'), 'finding details request');
     assert.ok(started[0].request_id, 'start request_id');
     assert.ok(wireEvents.indexOf('message-request') < wireEvents.indexOf('start-response'), `automatic trigger must be dispatched before start response: ${wireEvents.join(',')}`);
     const startMessage = calls.find((call) => call.method === 'ui/message');

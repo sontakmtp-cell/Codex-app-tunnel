@@ -169,6 +169,7 @@ class LocalBridge(ChangeJournal):
     def project_info(self):
         mode = getattr(self.runtime, "execution_mode", "normal")
         ready = self.runtime.can_execute
+        command_error = None if ready else (self.runtime.command_error or None)
         return {"workspace_root": self.root.as_posix(), "git_available": shutil.which("git") is not None,
                 "git_repository": git_repository(self.root),
                 "runtime": {"status": self.runtime.status, "version": self.runtime.version,
@@ -178,7 +179,7 @@ class LocalBridge(ChangeJournal):
                                                  "Normal: chỉ chạy task/lệnh qua policy bridge sau khi doctor đạt."),
                             "commands_enabled": ready,
                             "bash_enabled": mode == "turbo" and ready,
-                            "command_error": self.runtime.command_error},
+                            "command_error": command_error},
                 "capabilities": {"changes": True, "read_file": True, "control_panel": True,
                     "search": ready, "tasks": ready, "bash": mode == "turbo" and ready,
                     "watch": self.runtime.status == "connected", "skills": self.runtime.status == "connected",
@@ -515,6 +516,15 @@ class LocalBridge(ChangeJournal):
             raise BridgeError("INVALID_INPUT: Security payload is too large.")
         return _sha256(encoded)
 
+    def _security_operation_request_id(self, request_id, operation, scan_id, phase=None):
+        """Scope new mutation keys so one model id can be retried per operation."""
+        old = self._security_request_record(request_id)
+        if old and old["operation"] == operation:
+            return request_id
+        scope = {"request_id": request_id, "operation": operation,
+                 "scan_id": scan_id, "phase": phase}
+        return "security-" + self._security_hash(scope)[:48]
+
     @staticmethod
     def _security_status_from_scan(scan, fallback="running"):
         if not isinstance(scan, dict):
@@ -695,6 +705,12 @@ class LocalBridge(ChangeJournal):
 
     def _security_request_record(self, request_id):
         return self.db.execute("SELECT * FROM security_requests WHERE request_id=?", (request_id,)).fetchone()
+
+    def _security_checkpoint_record(self, scan_id, phase):
+        return self.db.execute(
+            "SELECT * FROM security_checkpoints WHERE scan_id=? AND phase=?",
+            (scan_id, phase),
+        ).fetchone()
 
     def _security_start_record_for_scan(self, scan_id):
         return self.db.execute(
@@ -959,6 +975,7 @@ class LocalBridge(ChangeJournal):
         data = self._security_phase_payload(phase, phase_data, fields)
         payload_hash = self._security_hash(self._security_mutation_payload("commit", scan_id, phase, data))
         with self.lock:
+            request_id = self._security_operation_request_id(request_id, "commit", scan_id, phase)
             old = self._security_check_request(request_id, "commit", payload_hash, scan_id)
             if old and old["status"] == "done":
                 return self.security_get_scan(scan_id)
@@ -978,6 +995,14 @@ class LocalBridge(ChangeJournal):
                 raise BridgeError("SECURITY_STATE_INVALID: scan has no supported review mode.")
             if current["phase"] != phase:
                 raise BridgeError("SECURITY_PHASE_ORDER: phase does not match the authoritative current phase.")
+            if phase == "finalization":
+                if self._security_checkpoint_record(scan_id, phase) and not old:
+                    raise BridgeError("SECURITY_FINALIZATION_ALREADY_COMMITTED: finalization is immutable.")
+                findings = data.get("findings")
+                if not isinstance(findings, list):
+                    raise BridgeError(
+                        "SECURITY_FINALIZATION_INVALID: findings must be a list; an empty list is valid."
+                    )
             next_phase = self._security_next_phase(current["reviewMode"], phase)
             if not old:
                 self._security_insert_request(request_id, "commit", payload_hash, scan_id, phase=phase)
@@ -999,6 +1024,7 @@ class LocalBridge(ChangeJournal):
         request_key(request_id)
         payload_hash = self._security_hash(self._security_mutation_payload("complete", scan_id))
         with self.lock:
+            request_id = self._security_operation_request_id(request_id, "complete", scan_id)
             old = self._security_check_request(request_id, "complete", payload_hash, scan_id)
             fallback = self._security_scan_record(scan_id) or self._security_start_record_for_scan(scan_id)
             current, _ = self._security_authoritative(scan_id, fallback)
@@ -1011,6 +1037,8 @@ class LocalBridge(ChangeJournal):
                 raise BridgeError("SECURITY_TERMINAL: scan is terminal; no mutation is allowed.")
             if current["phase"] != "finalization":
                 raise BridgeError("SECURITY_PHASE_ORDER: complete requires the finalization checkpoint.")
+            if not self._security_checkpoint_record(scan_id, "finalization"):
+                raise BridgeError("SECURITY_FINALIZATION_REQUIRED: finalization was not accepted.")
             if not old:
                 self._security_insert_request(request_id, "complete", payload_hash, scan_id, phase="finalization")
             response = self._security_call("complete_scan", scan_id, request_id)
@@ -1029,6 +1057,7 @@ class LocalBridge(ChangeJournal):
         request_key(request_id)
         payload_hash = self._security_hash(self._security_mutation_payload("cancel", scan_id))
         with self.lock:
+            request_id = self._security_operation_request_id(request_id, "cancel", scan_id)
             old = self._security_check_request(request_id, "cancel", payload_hash, scan_id)
             fallback = self._security_scan_record(scan_id) or self._security_start_record_for_scan(scan_id)
             current, _ = self._security_authoritative(scan_id, fallback)
@@ -1072,22 +1101,74 @@ class LocalBridge(ChangeJournal):
     def _security_public_findings(self, findings):
         if not isinstance(findings, list):
             return []
-        allowed = {"id", "title", "severity", "description", "confidence", "status", "line",
-                   "startLine", "endLine", "rule", "cwe", "owasp", "file"}
         result = []
         for finding in findings[:200]:
             if not isinstance(finding, dict):
                 continue
             item = {}
-            for key in allowed:
-                if key not in finding:
-                    continue
-                if key == "file":
-                    file_name = self._security_public_file(finding[key])
-                    if file_name:
-                        item[key] = file_name
-                    continue
-                item[key] = self._security_public_value(finding[key], key)
+            identifier = finding.get("id") or finding.get("findingId") or finding.get("occurrenceId")
+            if identifier:
+                item["id"] = self._security_public_value(identifier)
+            for key in ("title", "description", "status", "rule", "owasp", "remediation"):
+                if key in finding:
+                    item[key] = self._security_public_value(finding[key], key)
+            if "description" not in item:
+                summary = finding.get("summary")
+                if summary:
+                    item["description"] = self._security_public_value(summary)
+
+            severity = finding.get("severity")
+            if isinstance(severity, dict):
+                severity = severity.get("level")
+            if severity:
+                item["severity"] = self._security_public_value(str(severity).casefold())
+            confidence = finding.get("confidence")
+            if isinstance(confidence, dict):
+                confidence = confidence.get("level")
+            if confidence:
+                item["confidence"] = self._security_public_value(str(confidence).casefold())
+            rule_id = finding.get("ruleId")
+            if rule_id and "rule" not in item:
+                item["rule"] = self._security_public_value(rule_id)
+            taxonomy = finding.get("taxonomy")
+            if isinstance(taxonomy, dict) and taxonomy.get("cwe"):
+                item["cwe"] = self._security_public_value(taxonomy["cwe"])
+
+            locations = finding.get("locations")
+            public_locations = []
+            if isinstance(locations, list):
+                for raw_location in locations[:50]:
+                    if not isinstance(raw_location, dict):
+                        continue
+                    location_file = self._security_public_file(raw_location.get("path") or raw_location.get("file"))
+                    if not location_file:
+                        continue
+                    public_location = {"file": location_file}
+                    start = raw_location.get("startLine") or raw_location.get("start_line") or raw_location.get("line")
+                    end = raw_location.get("endLine") or raw_location.get("end_line")
+                    if isinstance(start, int) and not isinstance(start, bool) and start > 0:
+                        public_location["startLine"] = start
+                        if isinstance(end, int) and not isinstance(end, bool) and end >= start:
+                            public_location["endLine"] = end
+                    public_locations.append(public_location)
+            if public_locations:
+                item["locations"] = public_locations
+            location = public_locations[0] if public_locations else None
+            file_value = finding.get("file") or finding.get("path")
+            line_value = finding.get("line") or finding.get("startLine")
+            end_line = finding.get("endLine")
+            if isinstance(location, dict):
+                file_value = file_value or location.get("file")
+                line_value = line_value or location.get("startLine") or location.get("line")
+                end_line = end_line or location.get("endLine")
+            file_name = self._security_public_file(file_value)
+            if file_name:
+                item["file"] = file_name
+            if isinstance(line_value, int) and not isinstance(line_value, bool) and line_value > 0:
+                item["line"] = line_value
+                item["startLine"] = line_value
+            if isinstance(end_line, int) and not isinstance(end_line, bool) and end_line > 0:
+                item["endLine"] = end_line
             if item:
                 result.append(item)
         return result

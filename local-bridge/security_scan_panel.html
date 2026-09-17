@@ -656,14 +656,20 @@
       function findingCounts(scan) {
         const counts = scan && (scan.findingCounts || scan.finding_counts || {});
         const findings = Array.isArray(scan && scan.findings) ? scan.findings : [];
-        const total = Number(counts.total ?? counts.all ?? (scan && scan.findingCount) ?? findings.length) || 0;
+        const computed = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
+        findings.forEach((finding) => {
+          const severity = String(finding && finding.severity || "medium").toLowerCase();
+          const key = severity === "informational" ? "info" : severity;
+          if (key in computed) computed[key] += 1;
+        });
+        const reportedTotal = Number(counts.total ?? counts.all ?? (scan && scan.findingCount) ?? 0) || 0;
         return {
-          total,
-          critical: Number(counts.critical) || 0,
-          high: Number(counts.high) || 0,
-          medium: Number(counts.medium) || 0,
-          low: Number(counts.low) || 0,
-          info: Number(counts.info) || 0
+          total: Math.max(reportedTotal, findings.length),
+          critical: Math.max(Number(counts.critical) || 0, computed.critical),
+          high: Math.max(Number(counts.high) || 0, computed.high),
+          medium: Math.max(Number(counts.medium) || 0, computed.medium),
+          low: Math.max(Number(counts.low) || 0, computed.low),
+          info: Math.max(Number(counts.info) || 0, computed.info)
         };
       }
 
@@ -707,16 +713,19 @@
         const list = $("finding-list");
         list.replaceChildren();
         const allFindings = Array.isArray(scan && scan.findings) ? scan.findings.slice(0, 20) : [];
+        const counts = findingCounts(scan);
         const findings = state.findingFilter === "all"
           ? allFindings
           : allFindings.filter((finding) => String(finding.severity || "medium").toLowerCase() === state.findingFilter);
-        $("finding-count-badge").textContent = String(allFindings.length);
+        $("finding-count-badge").textContent = String(counts.total);
         renderFindingFilters(allFindings.length > 0);
         if (!findings.length) {
           const empty = document.createElement("p");
           empty.className = "muted empty-findings";
           empty.textContent = allFindings.length
             ? "Không có finding nào phù hợp với bộ lọc đã chọn."
+            : counts.total > 0
+              ? `Đã ghi nhận ${counts.total} finding nhưng chưa tải được chi tiết.`
             : isRunning(scan)
               ? "Đang phân tích các luồng mã nguồn, findings sẽ xuất hiện tại đây..."
               : "Không phát hiện lỗ hổng bảo mật nào trong phạm vi quét.";
@@ -891,9 +900,33 @@
         return true;
       }
 
+      function findingsPage(payload) {
+        const data = unpack(payload);
+        if (!data || typeof data !== "object") return null;
+        const page = data.findingsPage && typeof data.findingsPage === "object" ? data.findingsPage : data;
+        if (!Array.isArray(page.findings)) return null;
+        return {
+          scanId: String(page.scanId || page.scan_id || data.scanId || data.scan_id || state.scanId || ""),
+          findings: page.findings,
+          total: Number.isFinite(Number(page.total)) ? Number(page.total) : null
+        };
+      }
+
+      function applyFindingsData(payload) {
+        const page = findingsPage(payload);
+        if (!page || !state.scanId || (page.scanId && page.scanId !== state.scanId)) return false;
+        const next = { ...(state.scan || {}), scanId: state.scanId, findings: page.findings };
+        const counts = findingCounts(next);
+        if (page.total !== null) counts.total = Math.max(counts.total, page.total);
+        next.findingCounts = counts;
+        setScan(next);
+        return true;
+      }
+
       function applyPanelData(payload) {
         const data = unpack(payload);
         if (!data || typeof data !== "object") return;
+        if (applyFindingsData(data)) return;
         renderRepo(data.repo || data.repository || data.repoMetadata || data.repo_metadata);
         const active = normalizeScan(data.activeScan || data.active_scan || (data.scanId || data.scan_id ? data : null));
         const latest = normalizeScan(data.latestScan || data.latest_scan);
@@ -1074,10 +1107,15 @@
         localCall(name, args) {
           if (name === "show_security_scan_panel") return { repo: { name: "local preview", path: "project-path.txt", branch: "working tree", commit: "—" }, supportedTargets: ["codebase", "changes"], activeScan: this.localScan, latestScan: this.localLatest };
           if (name === "security_start_scan") {
-            this.localScan = { scanId: newId("local-scan"), reviewMode: args.review_mode, target: args.target, status: "running", phase: "preflight", nextPhase: "inventory", progress: 0, findingCounts: { total: 0 }, updatedAt: new Date().toISOString() };
+            this.localScan = { scanId: newId("local-scan"), reviewMode: args.review_mode, target: args.target, status: "running", phase: "preflight", nextPhase: "inventory", progress: 0, findings: [], findingCounts: { total: 0 }, updatedAt: new Date().toISOString() };
             return this.localScan;
           }
           if (name === "security_get_scan") return this.localScan || this.localLatest || {};
+          if (name === "security_list_findings") {
+            const scan = this.localScan || this.localLatest || {};
+            const findings = Array.isArray(scan.findings) ? scan.findings : [];
+            return { scanId: scan.scanId, findings, total: findings.length };
+          }
           if (name === "security_cancel_scan") {
             if (this.localScan) this.localScan = { ...this.localScan, status: "cancelled", updatedAt: new Date().toISOString() };
             this.localLatest = this.localScan;
@@ -1088,7 +1126,9 @@
       }
 
       const client = new McpAppsClient();
-      client.onToolResult = applyPanelData;
+      client.onToolResult = (payload) => {
+        if (!applyFindingsData(payload)) applyPanelData(payload);
+      };
 
       async function refreshPanel() {
         try {
@@ -1111,8 +1151,21 @@
         try {
           const result = await client.callTool("security_get_scan", { scan_id: state.scanId });
           const scan = normalizeScan(result);
-          if (scan && scan.scanId === state.scanId) setScan(scan);
-          setNotice(state.notice, state.noticeError);
+          if (scan && scan.scanId === state.scanId) {
+            try {
+              const page = await client.callTool("security_list_findings", { scan_id: state.scanId, max_results: 200 });
+              const findings = findingsPage(page);
+              if (findings) {
+                scan.findings = findings.findings;
+                scan.findingCounts = findingCounts(scan);
+                if (findings.total !== null) scan.findingCounts.total = Math.max(scan.findingCounts.total, findings.total);
+              }
+            } catch (error) {
+              if (!isRunning(scan)) setNotice(`Không đọc được danh sách findings: ${errorText(error)}`, true);
+            }
+            setScan(scan);
+          }
+          if (!state.noticeError) setNotice(state.notice, false);
         } catch (error) {
           if (isRunning()) setNotice(`Không đọc được trạng thái scan: ${errorText(error)}`, true);
         } finally {

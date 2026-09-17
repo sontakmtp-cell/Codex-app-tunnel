@@ -439,7 +439,7 @@ def security_list_findings(
         "security_list_findings",
         scan_id=scan_id,
         cursor=cursor,
-        max_results=max_results,
+        limit=max_results,
     )
 
 

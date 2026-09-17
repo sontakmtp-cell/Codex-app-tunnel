@@ -234,6 +234,23 @@ class SecurityServerTests(unittest.TestCase):
         self.assertIsInstance(result.structured_content, dict)
         self.assertEqual(self.fake.calls[-1][1]["phase"], "attack_surface")
 
+    def test_list_findings_maps_public_limit_name_to_bridge_limit(self):
+        async def exercise():
+            return await server.mcp.call_tool(
+                "security_list_findings",
+                {"scan_id": "scan-1", "cursor": "7", "max_results": 200},
+            )
+
+        result = asyncio.run(exercise())
+        self.assertIsInstance(result.structured_content, dict)
+        self.assertEqual(
+            self.fake.calls[-1],
+            (
+                "security_list_findings",
+                {"scan_id": "scan-1", "cursor": "7", "limit": 200},
+            ),
+        )
+
     def test_inventory_schema_reaches_bridge(self):
         async def exercise():
             return await server.mcp.call_tool(

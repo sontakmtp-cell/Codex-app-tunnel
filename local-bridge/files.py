@@ -272,6 +272,20 @@ class ProjectFiles:
         except UnicodeDecodeError as exc:
             raise BridgeError("BINARY_BLOCKED: only UTF-8 text files are supported.") from exc
 
+    @staticmethod
+    def _newline_style(data):
+        if not data:
+            return None
+        match = re.search(rb"\r\n|\n", data)
+        return match.group(0).decode("ascii") if match else None
+
+    @staticmethod
+    def _preserve_newlines(text, style):
+        if not style:
+            return text
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+        return normalized.replace("\n", style)
+
     def _read_bytes(self, raw):
         target, relative = self._file(raw)
         with target.open("rb") as f:
@@ -434,17 +448,24 @@ class ChangeJournal(ProjectFiles):
                 expected = expected.lower() if expected else None
                 if expected != _sha256(before):
                     raise BridgeError(f"SHA_CONFLICT: {relative}")
+                newline_style = self._newline_style(before)
                 if "content" in edit:
                     if "old_text" in edit or "new_text" in edit:
                         raise BridgeError("INVALID_INPUT: choose replacement or exact patch.")
                     content = edit["content"]
+                    if isinstance(content, str):
+                        content = self._preserve_newlines(content, newline_style)
                 else:
                     old_text, new_text = edit.get("old_text"), edit.get("new_text")
                     current = self._text(before) if before is not None else ""
-                    if not isinstance(old_text, str) or not old_text or current.count(old_text) != 1:
+                    if not isinstance(old_text, str) or not old_text:
                         raise BridgeError(f"PATCH_AMBIGUOUS: old_text must match exactly once in {relative}.")
                     if not isinstance(new_text, str):
                         raise BridgeError("INVALID_INPUT: new_text must be text.")
+                    old_text = self._preserve_newlines(old_text, newline_style)
+                    new_text = self._preserve_newlines(new_text, newline_style)
+                    if current.count(old_text) != 1:
+                        raise BridgeError(f"PATCH_AMBIGUOUS: old_text must match exactly once in {relative}.")
                     content = current.replace(old_text, new_text, 1)
                 if not isinstance(content, str):
                     raise BridgeError("INVALID_INPUT: content must be text.")
@@ -612,7 +633,8 @@ class ChangeJournal(ProjectFiles):
         result = self.apply_changes(change["change_id"], "legacy-apply-"+key)
         if result["status"] != "applied":
             raise BridgeError("CHANGE_STATE: the original legacy request is no longer applied; prepare a new change explicitly.")
-        return {"path": raw_path, "sha256": _sha256(content.encode()), "bytes_written": len(content.encode()),
+        after = self._current(raw_path)
+        return {"path": raw_path, "sha256": _sha256(after), "bytes_written": len(after or b""),
                 "change_id": result["change_id"], "status": result["status"]}
 
     def apply_patch(self, raw_path, old_text, new_text, expected_sha256):

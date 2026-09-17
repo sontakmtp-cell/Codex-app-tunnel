@@ -355,6 +355,100 @@ class SecurityMcpAdapterTests(unittest.TestCase):
         finally:
             adapter.shutdown()
 
+    def test_simple_findings_are_normalized_for_native_draft_schema(self):
+        popen = _FakePopen()
+        adapter = self.start_adapter(popen)
+        try:
+            started = adapter.start_scan("standard", {"kind": "codebase"}, None, "finding-normalize-start")
+            scan_id = started["structuredContent"]["workspace"]["results"]["scanId"]
+            adapter.commit_phase(
+                scan_id,
+                "finalization",
+                {
+                    "findings": [{
+                        "id": "F1",
+                        "title": "Unsafe fallback JWT signing secret",
+                        "severity": "critical",
+                        "paths": ["api/config.py", "api/auth.py"],
+                        "evidence": "The fallback secret signs authorization tokens.",
+                    }],
+                    "coverage": {"completeness": "complete", "deferred": []},
+                },
+                "finding-normalize-finalization",
+            )
+            draft = next(
+                arguments for name, arguments in popen.instances[0].tool_arguments
+                if name == "record_codex_security_scan_draft"
+            )
+            finding = draft["findings"][0]
+            self.assertEqual(finding["ruleId"], "unsafe-fallback-jwt-signing-secret")
+            self.assertEqual(finding["severity"]["level"], "critical")
+            self.assertEqual(finding["locations"][1]["path"], "api/auth.py")
+            self.assertEqual(finding["taxonomy"]["cwe"], [])
+            self.assertEqual(finding["provenance"]["sourceFindingIds"], ["F1"])
+        finally:
+            adapter.shutdown()
+
+    def test_findings_preserve_source_anchors_without_fabricating_line_one(self):
+        source_dir = self.target / "src"
+        source_dir.mkdir()
+        (source_dir / "vuln.py").write_text(
+            "".join(f"# filler {index}\n" for index in range(1, 121))
+            + "subprocess.run(user_input, shell=True)\n",
+            encoding="utf-8",
+        )
+        popen = _FakePopen()
+        adapter = self.start_adapter(popen)
+        try:
+            started = adapter.start_scan("standard", {"kind": "codebase"}, None, "finding-location-start")
+            scan_id = started["structuredContent"]["workspace"]["results"]["scanId"]
+            adapter.commit_phase(
+                scan_id,
+                "finalization",
+                {"findings": [
+                    {
+                        "id": "F-anchor",
+                        "title": "Unsafe shell execution",
+                        "file": "src/vuln.py",
+                        "source_anchors": [{
+                            "path": "src/vuln.py",
+                            "start_line": 121,
+                            "end_line": 121,
+                            "role": "sink",
+                        }],
+                        "evidence": "User-controlled input reaches shell execution.",
+                    },
+                    {
+                        "id": "F-path-only",
+                        "title": "Path-only evidence",
+                        "paths": ["src/vuln.py"],
+                        "evidence": "The source anchor has no line metadata.",
+                    },
+                    {
+                        "id": "F-anchor-unknown",
+                        "title": "Uncertain source line",
+                        "file": "src/vuln.py",
+                        "line": 1,
+                        "source_anchors": [{"path": "src/vuln.py"}],
+                        "evidence": "Line one is only a legacy fallback, not source evidence.",
+                    },
+                ]},
+                "finding-location-finalization",
+            )
+            draft = next(
+                arguments for name, arguments in popen.instances[0].tool_arguments
+                if name == "record_codex_security_scan_draft"
+            )
+            anchored = draft["findings"][0]["locations"][0]
+            self.assertEqual(anchored["path"], "src/vuln.py")
+            self.assertEqual(anchored["startLine"], 121)
+            self.assertEqual(anchored["endLine"], 121)
+            self.assertEqual(anchored["role"], "sink")
+            self.assertNotIn("startLine", draft["findings"][1]["locations"][0])
+            self.assertNotIn("startLine", draft["findings"][2]["locations"][0])
+        finally:
+            adapter.shutdown()
+
     def test_timeout_closes_runtime_and_does_not_replay(self):
         popen = _FakePopen(suppress_tool_responses=True)
         adapter = self.adapter(call_timeout=0.02)
