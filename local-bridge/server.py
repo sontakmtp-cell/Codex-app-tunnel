@@ -2,17 +2,21 @@ from __future__ import annotations
 
 import argparse
 from functools import partial, wraps
+from importlib.metadata import PackageNotFoundError, version as package_version
 import json
 import logging
 from pathlib import Path
 import sys
-from typing import Annotated, Any, Literal, Union
+from typing import Annotated, Any, Generic, Literal, TypeVar, Union
 
 import anyio
+from mcp.server.lowlevel.server import MODERN_PROTOCOL_VERSIONS
 from mcp.server import MCPServer
 from mcp.server.apps import Apps, ResourceCsp
-from mcp.types import ToolAnnotations
-from pydantic import BaseModel, ConfigDict, Field
+from mcp.server.mcpserver.context import Context
+from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
+from mcp.types import CallToolResult, TextContent, ToolAnnotations
+from pydantic import BaseModel, ConfigDict, Field, RootModel, ValidationError
 
 from bridge import LocalBridge
 from files import BridgeError, DEFAULT_MAX_FILE_BYTES, load_config
@@ -43,17 +47,566 @@ SECURITY_WIDGET_ONLY_META = {
 apps = Apps()
 _bridge: LocalBridge | None = None
 
+
+class PayloadModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+
+class ResponseFields(PayloadModel):
+    warnings: list[str] = Field(default_factory=list)
+
+
+class SuccessResponse(ResponseFields):
+    status: Literal["ok"] = "ok"
+
+
+class ErrorEnvelope(ResponseFields):
+    status: Literal["error"] = "error"
+    error_code: str
+    legacy_code: str
+    message: str
+    technical_message: str
+    retryable: bool
+    request_id: str | None = None
+    resource_uri: str | None = None
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+OutputT = TypeVar("OutputT", bound=BaseModel)
+
+
+class ToolOutput(RootModel[OutputT | ErrorEnvelope], Generic[OutputT]):
+    """Wire output keeps the legacy success shape and adds a typed error branch."""
+
+
+class RuntimeInfo(PayloadModel):
+    status: str
+    version: str | None = None
+    error: str | None = None
+    mode: Literal["normal", "turbo"]
+    mode_description: str
+    commands_enabled: bool
+    bash_enabled: bool
+    command_error: str | None = None
+
+
+class Capabilities(PayloadModel):
+    changes: bool
+    read_file: bool
+    control_panel: bool
+    search: bool
+    tasks: bool
+    bash: bool
+    watch: bool
+    skills: bool
+    history: bool
+    docs: bool
+
+
+class RecoveryConflict(PayloadModel):
+    id: str
+    error: str | None = None
+
+
+class ProjectInfo(PayloadModel):
+    workspace_root: str
+    git_available: bool
+    git_repository: bool
+    runtime: RuntimeInfo
+    capabilities: Capabilities
+    approved_tasks: list[str]
+    active_run_id: str | None = None
+    revision: int
+    recovery_conflicts: list[RecoveryConflict]
+
+
+class ProjectInfoResponse(ProjectInfo, SuccessResponse):
+    pass
+
+
+class ChangeSummary(PayloadModel):
+    id: str
+    title: str
+    status: str
+    created: float
+    updated: float
+    error: str | None = None
+
+
+class ChangeFile(PayloadModel):
+    path: str
+    before_sha256: str | None = None
+    after_sha256: str | None = None
+    created: bool
+
+
+class ChangeResponse(ResponseFields):
+    change_id: str
+    title: str
+    status: str
+    error: str | None = None
+    files: list[ChangeFile]
+    diff: str
+    next_offset: int | None = None
+
+
+class ChangesListResponse(SuccessResponse):
+    changes: list[ChangeSummary]
+
+
+class ListFilesResponse(SuccessResponse):
+    workspace_root: str
+    files: list[str]
+    truncated: bool
+
+
+class ReadFileResponse(SuccessResponse):
+    path: str
+    sha256: str
+    content: str
+    start_line: int
+    end_line: int
+    total_lines: int
+    partial_last_line: bool
+    next_line: int | None = None
+    truncated: bool
+
+
+class WriteFileResponse(ResponseFields):
+    path: str
+    sha256: str | None = None
+    bytes_written: int
+    change_id: str
+    status: str
+
+
+class ApplyPatchResponse(ResponseFields):
+    path: str
+    sha256: str | None = None
+    change_id: str
+    status: str
+
+
+class GitDiffResponse(SuccessResponse):
+    path: str | None = None
+    exit_code: int
+    diff: str
+    stderr: str
+    truncated: bool
+
+
+class RuntimeModeResponse(SuccessResponse):
+    mode: Literal["normal", "turbo"]
+    project: ProjectInfo
+
+
+class BashResponse(SuccessResponse):
+    mode: Literal["turbo"]
+    exit_code: int | None = None
+    stdout: str
+    stderr: str
+    truncated: bool
+
+
+class SearchMatch(PayloadModel):
+    path: str
+    line: int
+    text: str
+    context_start_line: int
+    context: str
+    sha256: str
+
+
+class SearchResponse(SuccessResponse):
+    matches: list[SearchMatch]
+    next_cursor: int | None = None
+    inventory_truncated: bool
+    output_truncated: bool
+    hint: str
+
+
+class TaskDefinition(PayloadModel):
+    task_id: str
+    command: list[str]
+
+
+class TaskState(PayloadModel):
+    tasks: list[TaskDefinition]
+    available: bool
+    unavailable_reason: str | None = None
+    active_run_id: str | None = None
+
+
+class TaskListResponse(SuccessResponse):
+    tasks: list[TaskDefinition]
+    available: bool
+    unavailable_reason: str | None = None
+    active_run_id: str | None = None
+
+
+class TaskEvent(PayloadModel):
+    stream: Literal["stdout", "stderr"]
+    text: str
+
+
+class TaskRunStatusResponse(ResponseFields):
+    run_id: str
+    task_id: str
+    status: str
+    elapsed_seconds: float
+    exit_code: int | None = None
+    error: str | None = None
+    events: list[TaskEvent]
+    next_cursor: int
+    logs_available: bool
+    truncated: bool
+    stopping: bool
+    timed_out: bool
+
+
+class RunTaskResponse(TaskRunStatusResponse):
+    stdout: str
+    stderr: str
+    command: list[str]
+
+
+class SkillSummary(PayloadModel):
+    skill_id: str
+    name: str
+    description: str
+
+
+class SkillsResponse(SuccessResponse):
+    skills: list[SkillSummary]
+    instruction: str
+
+
+class ThreadSummary(PayloadModel):
+    thread_id: str
+    title: str
+    updated_at: str | None = None
+    status: str | None = None
+
+
+class ThreadListResponse(SuccessResponse):
+    threads: list[ThreadSummary]
+    next_cursor: str | None = None
+
+
+class ThreadMessage(PayloadModel):
+    role: Literal["user", "assistant"]
+    text: str
+
+
+class ThreadTurn(PayloadModel):
+    turn_id: str | None = None
+    status: str | None = None
+    messages: list[ThreadMessage]
+
+
+class ThreadResponse(SuccessResponse):
+    thread_id: str
+    turns: list[ThreadTurn]
+    next_turn: int | None = None
+    note: str
+
+
+class DocsResponse(SuccessResponse):
+    result: Any
+
+
+class ControlPanelResponse(SuccessResponse):
+    panel_available: bool
+    resource_uri: str = UI_URI
+    project: ProjectInfo
+    changes: list[ChangeSummary]
+    task_state: TaskState
+
+
+class MCPImplementationSnapshot(PayloadModel):
+    name: str
+    version: str
+    title: str | None = None
+    description: str | None = None
+    website_url: str | None = Field(default=None, alias="websiteUrl")
+    icons: list[dict[str, Any]] | None = None
+
+
+class MCPServerCapabilitiesSnapshot(PayloadModel):
+    # MCP capabilities are intentionally open-ended; known fields stay typed while
+    # future protocol extensions remain visible instead of breaking diagnostics.
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    experimental: dict[str, dict[str, Any]] | None = None
+    logging: dict[str, Any] | None = None
+    prompts: dict[str, Any] | None = None
+    resources: dict[str, Any] | None = None
+    tools: dict[str, Any] | None = None
+    completions: dict[str, Any] | None = None
+    extensions: dict[str, dict[str, Any]] | None = None
+    tasks: dict[str, Any] | None = None
+
+
+class MCPClientCapabilitiesSnapshot(PayloadModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    experimental: dict[str, dict[str, Any]] | None = None
+    sampling: dict[str, Any] | None = None
+    elicitation: dict[str, Any] | None = None
+    roots: dict[str, Any] | None = None
+    extensions: dict[str, dict[str, Any]] | None = None
+    tasks: dict[str, Any] | None = None
+
+
+class MCPDiagnosticsResponse(SuccessResponse):
+    request_id: str | None = None
+    resource_uri: str = UI_URI
+    protocol_version: str
+    supported_protocol_versions: list[str]
+    sdk_version: str | None = None
+    bridge_version: str
+    server_info: MCPImplementationSnapshot
+    server_capabilities: MCPServerCapabilitiesSnapshot
+    client_info: MCPImplementationSnapshot | None = None
+    client_capabilities: MCPClientCapabilitiesSnapshot | None = None
+    apps_support: bool
+    apps_extension_id: str
+    apps_extension: dict[str, Any] | None = None
+    tasks_support: bool
+    local_tasks_support: bool
+    subscriptions_support: bool
+    structured_output_support: bool
+    cache_hints_support: bool
+    cache_hints_configured: bool
+    legacy_compatibility_mode: bool
+    connection_state: Literal["connected", "disconnected", "unknown"]
+    runtime_state: RuntimeInfo | None = None
+    current_project: str | None = None
+
+
+class SecurityRepository(PayloadModel):
+    name: str
+    branch: str | None = None
+    commit: str | None = None
+    gitRepository: bool
+
+
+class SecurityScanPayload(PayloadModel):
+    scanId: str | None = None
+    requestId: str | None = None
+    reviewMode: str | None = None
+    target: str | None = None
+    status: str = "running"
+    phase: str | None = None
+    currentPhase: str | None = None
+    nextPhase: str | None = None
+    updatedAt: str | None = None
+    coverageSoFar: dict[str, Any] | None = None
+    findingCounts: dict[str, Any] | None = None
+    phaseInstructions: str | None = None
+
+
+class SecurityScanResponse(SecurityScanPayload, ResponseFields):
+    pass
+
+
+class SecurityPanelResponse(SuccessResponse):
+    panel: Literal["security-scan-v1"] = "security-scan-v1"
+    resource_uri: str = SECURITY_UI_URI
+    repository: SecurityRepository = SecurityRepository(name="", gitRepository=False)
+    supportedTargets: list[Literal["codebase", "changes"]] = Field(default_factory=lambda: ["codebase"])
+    supportedReviewModes: list[Literal["standard", "chatgpt_deep"]] = Field(
+        default_factory=lambda: ["standard", "chatgpt_deep"]
+    )
+    activeScan: SecurityScanPayload | None = None
+    latestScan: SecurityScanPayload | None = None
+
+
+class SecurityFindingLocation(PayloadModel):
+    file: str
+    startLine: int | None = None
+    endLine: int | None = None
+
+
+class SecurityFinding(PayloadModel):
+    id: str | None = None
+    title: str | None = None
+    description: str | None = None
+    status: str | None = None
+    rule: str | None = None
+    owasp: str | None = None
+    remediation: str | None = None
+    severity: str | None = None
+    confidence: str | None = None
+    cwe: list[Any] | str | None = None
+    locations: list[SecurityFindingLocation] | None = None
+    file: str | None = None
+    line: int | None = None
+    startLine: int | None = None
+    endLine: int | None = None
+
+
+class SecurityFindingsResponse(SuccessResponse):
+    scanId: str
+    findings: list[SecurityFinding]
+    nextCursor: str | int | None = None
+    total: int | None = None
+
+
+class SecurityExportResponse(SuccessResponse):
+    scanId: str
+    format: Literal["json", "sarif", "markdown"]
+    data: Any = None
+    # Kept for adapters/legacy fixtures that used the older public key.
+    content: Any = None
+
+
+_ERROR_CODE_ALIASES = {
+    "SHA_CONFLICT": "SHA_MISMATCH",
+    "CHANGE_STATE": "STALE_CHANGE",
+    "RECOVERY_CONFLICT": "STALE_CHANGE",
+    "SCOPE_DENIED": "PERMISSION_DENIED",
+    "PATH_BLOCKED": "PERMISSION_DENIED",
+    "TASK_NOT_ALLOWED": "TASK_UNAVAILABLE",
+    "SECURITY_REQUEST_NOT_FOUND": "NOT_FOUND",
+    "SECURITY_SCAN_ACTIVE": "SCAN_STATE_CONFLICT",
+    "SECURITY_TERMINAL": "SCAN_STATE_CONFLICT",
+    "SECURITY_PHASE_ORDER": "SCAN_STATE_CONFLICT",
+    "SECURITY_STATE_INVALID": "SCAN_STATE_CONFLICT",
+    "SECURITY_FINALIZATION_ALREADY_COMMITTED": "SCAN_STATE_CONFLICT",
+    "SECURITY_FINALIZATION_INVALID": "SCAN_STATE_CONFLICT",
+    "SECURITY_FINALIZATION_REQUIRED": "SCAN_STATE_CONFLICT",
+    "SECURITY_COMPLETE_FAILED": "SCAN_STATE_CONFLICT",
+    "SECURITY_CANCEL_FAILED": "SCAN_STATE_CONFLICT",
+}
+_RETRYABLE_ERROR_CODES = {
+    "TASK_BUSY", "SANDBOX_UNAVAILABLE", "RUNTIME_UNAVAILABLE", "RUNTIME_LOST",
+    "RUNTIME_TIMEOUT", "BASH_UNAVAILABLE", "SECURITY_ADAPTER_UNAVAILABLE",
+    "SECURITY_ADAPTER_FAILED",
+}
+_ERROR_WARNINGS = {
+    "INVALID_INPUT": "Correct the listed argument fields and retry.",
+    "INTERNAL_ERROR": "Inspect the bridge logs before retrying this operation.",
+    "OUTPUT_INVALID": "The tool returned data outside its published response schema.",
+    "SHA_MISMATCH": "Read the current file SHA-256 and prepare a new change.",
+    "STALE_CHANGE": "Refresh the change state before retrying.",
+    "IDEMPOTENCY_CONFLICT": "Reuse the original request_id only for the original payload.",
+    "PERMISSION_DENIED": "The bridge refused the path or operation by policy.",
+    "TASK_UNAVAILABLE": "Use list_tasks and the locally configured task IDs.",
+    "SANDBOX_UNAVAILABLE": "Run the local doctor/check and retry when the sandbox is ready.",
+    "SCAN_STATE_CONFLICT": "Read the authoritative scan state before choosing the next action.",
+    "NOT_FOUND": "Refresh the listed resource before retrying.",
+}
+
+
+def _error_envelope(
+    exc: BridgeError, request_id: str | None = None, resource_uri: str | None = None
+) -> ErrorEnvelope:
+    technical = str(exc)
+    head, separator, detail = technical.partition(":")
+    legacy_code = head.strip().upper() if head.strip().replace("_", "").isalnum() else "BRIDGE_ERROR"
+    error_code = _ERROR_CODE_ALIASES.get(legacy_code, legacy_code)
+    message = detail.strip() if separator and detail.strip() else technical
+    details: dict[str, Any] = {}
+    if legacy_code in {"SHA_CONFLICT", "SHA_MISMATCH"}:
+        paths = [item.strip() for item in detail.split(",") if item.strip()]
+        if paths:
+            details["paths"] = paths
+    return ErrorEnvelope(
+        error_code=error_code,
+        legacy_code=legacy_code,
+        message=message,
+        technical_message=technical,
+        retryable=legacy_code in _RETRYABLE_ERROR_CODES,
+        request_id=request_id,
+        resource_uri=resource_uri,
+        warnings=[_ERROR_WARNINGS[error_code]] if error_code in _ERROR_WARNINGS else [],
+        details=details,
+    )
+
+
+def _tool_error_result(error: ErrorEnvelope) -> CallToolResult:
+    return CallToolResult(
+        content=[TextContent(type="text", text=error.technical_message)],
+        structured_content=error.model_dump(mode="json"),
+        is_error=True,
+    )
+
+
+def _arguments_request_id(arguments: dict[str, Any]) -> str | None:
+    request_id = arguments.get("request_id")
+    request = arguments.get("request")
+    if request_id is None and isinstance(request, dict):
+        request_id = request.get("request_id")
+    return request_id if isinstance(request_id, str) else None
+
+
+class BridgeMCPServer(MCPServer):
+    async def call_tool(self, name: str, arguments: dict[str, Any], context=None):
+        try:
+            return await super().call_tool(name, arguments, context)
+        except UnexpectedToolError as exc:
+            tool = self._tool_manager.get_tool(name)
+            if tool is None:
+                raise
+            cause = exc.__cause__
+            error_code = "OUTPUT_INVALID" if isinstance(cause, ValidationError) else "INTERNAL_ERROR"
+            technical = f"{exc}: {cause}" if cause else str(exc)
+            details = {"cause_type": type(cause).__name__} if cause else {}
+            if isinstance(cause, ValidationError):
+                details["fields"] = sorted({".".join(str(part) for part in error["loc"])
+                                             for error in cause.errors()})
+            error = ErrorEnvelope(
+                error_code=error_code,
+                legacy_code="OUTPUT_VALIDATION" if error_code == "OUTPUT_INVALID" else "UNEXPECTED_TOOL_ERROR",
+                message="Tool output failed validation." if error_code == "OUTPUT_INVALID" else "Tool execution failed.",
+                technical_message=technical,
+                retryable=False,
+                request_id=_arguments_request_id(arguments),
+                resource_uri=((tool.meta or {}).get("ui") or {}).get("resourceUri"),
+                warnings=[_ERROR_WARNINGS[error_code]],
+                details=details,
+            )
+            return _tool_error_result(error)
+        except ToolError as exc:
+            tool = self._tool_manager.get_tool(name)
+            if tool is None or not isinstance(exc.__cause__, ValidationError):
+                raise
+            fields = sorted({".".join(str(part) for part in error["loc"])
+                             for error in exc.__cause__.errors()})
+            resource_uri = ((tool.meta or {}).get("ui") or {}).get("resourceUri")
+            error = ErrorEnvelope(
+                error_code="INVALID_INPUT",
+                legacy_code="INVALID_INPUT",
+                message="Tool arguments failed validation.",
+                technical_message=str(exc),
+                retryable=False,
+                request_id=_arguments_request_id(arguments),
+                resource_uri=resource_uri,
+                warnings=[_ERROR_WARNINGS["INVALID_INPUT"]],
+                details={"fields": fields},
+            )
+            return _tool_error_result(error)
+
 def bridge():
     if _bridge is None:
         raise BridgeError("BRIDGE_UNAVAILABLE: bridge has not initialized.")
     return _bridge
 
 
-def _offload(fn):
+def _offload(fn, resource_uri: str | None = None):
     @wraps(fn)
     async def offload(*args, **kwargs):
         # Keep STDIO responsive while a synchronous compatibility task waits.
-        return await anyio.to_thread.run_sync(partial(fn, *args, **kwargs))
+        try:
+            return await anyio.to_thread.run_sync(partial(fn, *args, **kwargs))
+        except BridgeError as exc:
+            request_id = kwargs.get("request_id")
+            request = kwargs.get("request")
+            if request_id is None and isinstance(request, BaseModel):
+                request_id = getattr(request, "request_id", None)
+            error = _error_envelope(exc, request_id, resource_uri)
+            return _tool_error_result(error)
     return offload
 
 
@@ -61,9 +614,10 @@ def app_tool(description, annotations=READ_ONLY, meta=None):
     def register(fn):
         return apps.tool(resource_uri=UI_URI, visibility=["model", "app"],
                          description=description, annotations=annotations,
+                         structured_output=True,
                          meta=meta or {"openai/widgetAccessible": True,
                                         "openai/outputTemplate": UI_URI,
-                                        "ui/resourceUri": UI_URI})(_offload(fn))
+                                        "ui/resourceUri": UI_URI})(_offload(fn, UI_URI))
     return register
 
 
@@ -74,12 +628,12 @@ def security_app_tool(description, annotations=READ_ONLY, meta=None):
             annotations=annotations,
             structured_output=True,
             meta=meta or {"ui": {"visibility": ["model", "app"]}, "openai/widgetAccessible": True},
-        )(_offload(fn))
+        )(_offload(fn, (meta or {}).get("ui", {}).get("resourceUri")))
     return register
 
 
 @app_tool("Use this to open the project control panel. Data tools keep working without UI; do not reopen it for log polling.")
-def show_control_panel() -> dict[str, Any]:
+def show_control_panel() -> Annotated[CallToolResult, ToolOutput[ControlPanelResponse]]:
     return bridge().show_control_panel()
 
 
@@ -105,7 +659,7 @@ apps.add_html_resource(
 )
 
 
-mcp = MCPServer("chatgpt-local-bridge", version="2.2.2", extensions=[apps], instructions=(
+mcp = BridgeMCPServer("chatgpt-local-bridge", version="2.2.2", extensions=[apps], instructions=(
     "ChatGPT writes and reasons about code directly; this bridge never starts Codex generation or review. "
     "Read project_info first. Paths are relative to its fixed project. Read files and use their SHA-256 before editing. "
     "Prepare a change to view its diff; if asked only to preview, stop there. Otherwise apply the prepared change "
@@ -126,141 +680,234 @@ mcp = MCPServer("chatgpt-local-bridge", version="2.2.2", extensions=[apps], inst
 
 def tool(description, annotations=READ_ONLY, meta=None):
     def register(fn):
-        return mcp.tool(description=description, annotations=annotations, meta=meta or DATA_META)(_offload(fn))
+        return mcp.tool(description=description, annotations=annotations, meta=meta or DATA_META,
+                        structured_output=True)(_offload(
+                            fn, (meta or {}).get("ui", {}).get("resourceUri")))
     return register
 
 
+@tool("Use this from the control panel to inspect the negotiated MCP protocol, capabilities and safe bridge runtime metadata.")
+def mcp_diagnostics(ctx: Context) -> Annotated[CallToolResult, ToolOutput[MCPDiagnosticsResponse]]:
+    protocol_server = mcp
+    try:
+        protocol_server = ctx.mcp_server
+    except ValueError:
+        pass
+
+    protocol_version = ctx.protocol_version or "unknown"
+    request_id = None
+    client_capabilities = None
+    client_info = None
+    request_context = None
+    try:
+        request_context = ctx.request_context
+        request_id = str(request_context.request_id)
+        session = request_context.session
+        protocol_version = session.protocol_version or protocol_version
+        client_capabilities = session.client_capabilities
+        client_params = session.client_params
+        client_info = getattr(client_params, "client_info", None) if client_params else None
+    except ValueError:
+        pass
+
+    lowlevel = protocol_server._lowlevel_server
+    server_capabilities = lowlevel.get_capabilities(
+        protocol_version=None if protocol_version == "unknown" else protocol_version
+    )
+    server_capabilities_data = server_capabilities.model_dump(
+        by_alias=True, mode="json", exclude_none=True
+    )
+    client_capabilities_data = (
+        client_capabilities.model_dump(by_alias=True, mode="json", exclude_none=True)
+        if client_capabilities is not None
+        else None
+    )
+    client_info_data = (
+        client_info.model_dump(by_alias=True, mode="json", exclude_none=True)
+        if client_info is not None
+        else None
+    )
+    extensions = server_capabilities_data.get("extensions") or {}
+    apps_extension_id = apps.identifier
+    project = bridge().project_info()
+    project_capabilities = project.get("capabilities") or {}
+    runtime = project.get("runtime")
+    try:
+        sdk_version = package_version("mcp")
+    except PackageNotFoundError:
+        sdk_version = None
+    try:
+        subscriptions_support = lowlevel.get_request_handler("subscriptions/listen") is not None
+    except (AttributeError, KeyError):
+        subscriptions_support = False
+
+    cache_hints = getattr(lowlevel, "cache_hints", None)
+    tools = protocol_server._tool_manager.list_tools()
+    server_info = MCPImplementationSnapshot(
+        name=lowlevel.name,
+        version=lowlevel.version,
+    )
+    return MCPDiagnosticsResponse(
+        request_id=request_id,
+        protocol_version=protocol_version,
+        supported_protocol_versions=sorted(MODERN_PROTOCOL_VERSIONS),
+        sdk_version=sdk_version,
+        bridge_version=lowlevel.version,
+        server_info=server_info,
+        server_capabilities=MCPServerCapabilitiesSnapshot.model_validate(server_capabilities_data),
+        client_info=(MCPImplementationSnapshot.model_validate(client_info_data)
+                     if client_info_data else None),
+        client_capabilities=(MCPClientCapabilitiesSnapshot.model_validate(client_capabilities_data)
+                             if client_capabilities_data is not None else None),
+        apps_support=apps_extension_id in extensions,
+        apps_extension_id=apps_extension_id,
+        apps_extension=extensions.get(apps_extension_id),
+        tasks_support=server_capabilities_data.get("tasks") is not None,
+        local_tasks_support=bool(project_capabilities.get("tasks")),
+        subscriptions_support=subscriptions_support,
+        structured_output_support=bool(tools) and all(tool.output_schema is not None for tool in tools),
+        cache_hints_support=cache_hints is not None,
+        cache_hints_configured=bool(cache_hints),
+        legacy_compatibility_mode=(
+            protocol_version != "unknown" and protocol_version not in MODERN_PROTOCOL_VERSIONS
+        ),
+        connection_state="connected" if request_context is not None else "unknown",
+        runtime_state=RuntimeInfo.model_validate(runtime) if isinstance(runtime, dict) else None,
+        current_project=project.get("workspace_root"),
+    ).model_dump(mode="json")
+
+
 @tool("Use this when you need to discover files inside the configured project.")
-def list_files(prefix: str = "", max_results: int = 500) -> dict[str, Any]:
+def list_files(prefix: str = "", max_results: int = 500) -> Annotated[CallToolResult, ToolOutput[ListFilesResponse]]:
     return bridge().list_files(prefix, max_results)
 
 
 @tool("Use this when reading UTF-8 source before editing. Returns full-file SHA, total lines and continuation.")
 def read_file(path: str, start_line: int = 1, max_bytes: int = DEFAULT_MAX_FILE_BYTES,
-              end_line: int | None = None) -> dict[str, Any]:
+              end_line: int | None = None) -> Annotated[CallToolResult, ToolOutput[ReadFileResponse]]:
     return bridge().read_file(path, start_line, max_bytes, end_line)
 
 
 @tool("Use this when the user asks for a full file replacement. Creates an undoable one-file change.", MUTATING)
-def write_file(path: str, content: str, expected_sha256: str | None = None) -> dict[str, Any]:
+def write_file(path: str, content: str, expected_sha256: str | None = None) -> Annotated[CallToolResult, ToolOutput[WriteFileResponse]]:
     return bridge().write_file(path, content, expected_sha256)
 
 
 @tool("Use this for a focused edit: old_text must match exactly once. Creates an undoable change.", MUTATING)
-def apply_patch(path: str, old_text: str, new_text: str, expected_sha256: str) -> dict[str, Any]:
+def apply_patch(path: str, old_text: str, new_text: str, expected_sha256: str) -> Annotated[CallToolResult, ToolOutput[ApplyPatchResponse]]:
     return bridge().apply_patch(path, old_text, new_text, expected_sha256)
 
 
 @tool("Use this to read a Git diff filtered to permitted text files. Requires a Git repository.")
-def git_diff(path: str | None = None) -> dict[str, Any]:
+def git_diff(path: str | None = None) -> Annotated[CallToolResult, ToolOutput[GitDiffResponse]]:
     return bridge().git_diff(path)
 
 
 @tool("Use this for a short approved task and wait for completion; use start_task for long tasks.", RUN_SYNC)
-def run_task(task_id: str, timeout_seconds: int = 120) -> dict[str, Any]:
+def run_task(task_id: str, timeout_seconds: int = 120) -> Annotated[CallToolResult, ToolOutput[RunTaskResponse]]:
     return bridge().tasks.run_task(task_id, timeout_seconds)
 
 
 @tool("Switch between Normal and Turbo. Turbo requires explicit confirmation and grants Codex full command sandbox access.", MUTATING, APP_CALL_META)
-def set_runtime_mode(mode: str, confirm: bool = False) -> dict[str, Any]:
+def set_runtime_mode(mode: str, confirm: bool = False) -> Annotated[CallToolResult, ToolOutput[RuntimeModeResponse]]:
     return bridge().set_runtime_mode(mode, confirm)
 
 
 @tool("Run a command through Git Bash. Only available after the user explicitly enables Turbo in the control panel.", TURBO_RUN)
-def run_bash(command: str, timeout_seconds: int = 120) -> dict[str, Any]:
+def run_bash(command: str, timeout_seconds: int = 120) -> Annotated[CallToolResult, ToolOutput[BashResponse]]:
     return bridge().run_bash(command, timeout_seconds)
 
 
 @tool("Use this first to inspect the fixed project, runtime, approved tasks and enabled capabilities.")
-def project_info() -> dict[str, Any]:
+def project_info() -> Annotated[CallToolResult, ToolOutput[ProjectInfoResponse]]:
     return bridge().project_info()
 
 
 @tool("Use this to find literal text via installed rg; filter by folder or file extensions and follow next_cursor.")
 def search_code(query: str, prefix: str = "", file_types: list[str] | None = None,
                 case_sensitive: bool = True, max_results: int = 50, cursor: int = 0,
-                context_lines: int = 2) -> dict[str, Any]:
+                context_lines: int = 2) -> Annotated[CallToolResult, ToolOutput[SearchResponse]]:
     return bridge().search_code(query, prefix, file_types, case_sensitive, max_results, cursor, context_lines)
 
 
 @tool("Use this to prepare a multi-file diff without writing project files. Each edit needs path, expected_sha256 "
       "(null for new files), and either content or old_text/new_text. Reuse request_id for identical retries.", PREPARE)
-def prepare_changes(title: str, edits: list[dict[str, Any]], request_id: str) -> dict[str, Any]:
+def prepare_changes(title: str, edits: list[dict[str, Any]], request_id: str) -> Annotated[CallToolResult, ToolOutput[ChangeResponse]]:
     return bridge().prepare_changes(title, edits, request_id)
 
 
 @tool("Use this to list prepared, applied, undone and failed changes.")
-def list_changes(limit: int = 30) -> dict[str, Any]:
+def list_changes(limit: int = 30) -> Annotated[CallToolResult, ToolOutput[ChangesListResponse]]:
     return bridge().list_changes(limit)
 
 
 @tool("Use this to inspect an exact saved diff, optionally one file. Follow next_offset for more text.")
-def get_change(change_id: str, path: str | None = None, offset: int = 0, max_chars: int = 20000) -> dict[str, Any]:
+def get_change(change_id: str, path: str | None = None, offset: int = 0, max_chars: int = 20000) -> Annotated[CallToolResult, ToolOutput[ChangeResponse]]:
     return bridge().get_change(change_id, path, offset, max_chars)
 
 
 @tool("Use this to apply a prepared diff within the user's authorized edit. Refuses stale files and active tasks.", MUTATING)
-def apply_changes(change_id: str, request_id: str) -> dict[str, Any]:
+def apply_changes(change_id: str, request_id: str) -> Annotated[CallToolResult, ToolOutput[ChangeResponse]]:
     return bridge().apply_changes(change_id, request_id)
 
 
 @tool("Use this when the user wants to undo a bridge change. Refuses the whole batch if any file changed later.", MUTATING)
-def undo_changes(change_id: str, request_id: str) -> dict[str, Any]:
+def undo_changes(change_id: str, request_id: str) -> Annotated[CallToolResult, ToolOutput[ChangeResponse]]:
     return bridge().undo_changes(change_id, request_id)
 
 
 @tool("Use this to find approved local task IDs and whether sandboxed execution is available.")
-def list_tasks() -> dict[str, Any]:
+def list_tasks() -> Annotated[CallToolResult, ToolOutput[TaskListResponse]]:
     return bridge().tasks.list_tasks()
 
 
 @tool("Use this to start an approved test/build and return run_id immediately. Reuse request_id on retries.", MUTATING)
-def start_task(task_id: str, request_id: str, timeout_seconds: int = 120) -> dict[str, Any]:
+def start_task(task_id: str, request_id: str, timeout_seconds: int = 120) -> Annotated[CallToolResult, ToolOutput[TaskRunStatusResponse]]:
     return bridge().tasks.start_task(task_id, request_id, timeout_seconds)
 
 
 @tool("Use this to read task status, elapsed time, exit code and new log events after a cursor.")
-def get_task_run(run_id: str, cursor: int = 0, max_events: int = 100) -> dict[str, Any]:
+def get_task_run(run_id: str, cursor: int = 0, max_events: int = 100) -> Annotated[CallToolResult, ToolOutput[TaskRunStatusResponse]]:
     return bridge().tasks.get_task_run(run_id, cursor, max_events)
 
 
 @tool("Use this to stop an owned task and its descendants. Repeated Stop requests are safe.", MUTATING)
-def stop_task_run(run_id: str, request_id: str) -> dict[str, Any]:
+def stop_task_run(run_id: str, request_id: str) -> Annotated[CallToolResult, ToolOutput[TaskRunStatusResponse]]:
     return bridge().tasks.stop_task_run(run_id, request_id)
 
 
 @tool("Use this to discover Codex skills available for the configured project. Guidance grants no tool permissions.")
-def list_skills() -> dict[str, Any]:
+def list_skills() -> Annotated[CallToolResult, ToolOutput[SkillsResponse]]:
     return bridge().list_skills()
 
 
 @tool("Use this to read instructions for an ID returned by list_skills.")
-def read_skill(skill_id: str, start_line: int = 1, max_bytes: int = 20000) -> dict[str, Any]:
+def read_skill(skill_id: str, start_line: int = 1, max_bytes: int = 20000) -> Annotated[CallToolResult, ToolOutput[ReadFileResponse]]:
     return bridge().read_skill(skill_id, start_line, max_bytes)
 
 
 @tool("Use this to read a reference within a discovered skill's own folder; this cannot run its scripts.")
-def read_skill_resource(skill_id: str, path: str, start_line: int = 1, max_bytes: int = 20000) -> dict[str, Any]:
+def read_skill_resource(skill_id: str, path: str, start_line: int = 1, max_bytes: int = 20000) -> Annotated[CallToolResult, ToolOutput[ReadFileResponse]]:
     return bridge().read_skill_resource(skill_id, path, start_line, max_bytes)
 
 
 @tool("Use this only when the user requests Codex task context for this exact project.")
-def list_codex_threads(cursor: str | None = None, limit: int = 20) -> dict[str, Any]:
+def list_codex_threads(cursor: str | None = None, limit: int = 20) -> Annotated[CallToolResult, ToolOutput[ThreadListResponse]]:
     return bridge().list_codex_threads(cursor, limit)
 
 
 @tool("Use this to read conversation text from a listed project task, without resuming or modifying it.")
-def read_codex_thread(thread_id: str, start_turn: int = 0, limit: int = 5) -> dict[str, Any]:
+def read_codex_thread(thread_id: str, start_turn: int = 0, limit: int = 5) -> Annotated[CallToolResult, ToolOutput[ThreadResponse]]:
     return bridge().read_codex_thread(thread_id, start_turn, limit)
 
 
 @tool("Use this to search official OpenAI documentation through the approved Codex MCP. No model turn is started.", DOCS)
-def codex_docs_search(query: str, limit: int = 5, cursor: str | None = None) -> dict[str, Any]:
+def codex_docs_search(query: str, limit: int = 5, cursor: str | None = None) -> Annotated[CallToolResult, ToolOutput[DocsResponse]]:
     return bridge().codex_docs_search(query, limit, cursor)
 
 
 @tool("Use this to fetch an official OpenAI documentation page through the approved Codex MCP.", DOCS)
-def codex_docs_fetch(url: str, anchor: str | None = None) -> dict[str, Any]:
+def codex_docs_fetch(url: str, anchor: str | None = None) -> Annotated[CallToolResult, ToolOutput[DocsResponse]]:
     return bridge().codex_docs_fetch(url, anchor)
 
 
@@ -364,7 +1011,7 @@ def _security_call(method: str, **kwargs: Any) -> dict[str, Any]:
     "it never starts a scan.",
     meta=SECURITY_APP_CALL_META,
 )
-def show_security_scan_panel() -> dict[str, Any]:
+def show_security_scan_panel() -> Annotated[CallToolResult, ToolOutput[SecurityPanelResponse]]:
     return _security_call("show_security_scan_panel")
 
 
@@ -379,7 +1026,7 @@ def security_start_scan(
     target: Literal["codebase", "changes"],
     request_id: Annotated[str, Field(min_length=1, max_length=128)],
     user_context: Annotated[str | None, Field(default=None, max_length=4000)] = None,
-) -> dict[str, Any]:
+) -> Annotated[CallToolResult, ToolOutput[SecurityScanResponse]]:
     return _security_call(
         "security_start_scan",
         review_mode=review_mode,
@@ -396,12 +1043,12 @@ def security_start_scan(
 def security_get_scan(
     scan_id: Annotated[str | None, Field(min_length=1, max_length=128)] = None,
     request_id: Annotated[str | None, Field(min_length=1, max_length=128)] = None,
-) -> dict[str, Any]:
+) -> Annotated[CallToolResult, ToolOutput[SecurityScanResponse]]:
     return _security_call("security_get_scan", scan_id=scan_id, request_id=request_id)
 
 
 @security_app_tool("Read the next allowed Security workflow phase and resume instructions.")
-def security_continue_scan(scan_id: Annotated[str, Field(min_length=1, max_length=128)]) -> dict[str, Any]:
+def security_continue_scan(scan_id: Annotated[str, Field(min_length=1, max_length=128)]) -> Annotated[CallToolResult, ToolOutput[SecurityScanResponse]]:
     return _security_call("security_continue_scan", scan_id=scan_id)
 
 
@@ -409,7 +1056,7 @@ def security_continue_scan(scan_id: Annotated[str, Field(min_length=1, max_lengt
     "Commit one typed Security workflow checkpoint; phase-specific fields are selected by the phase discriminator.",
     MUTATING,
 )
-def security_commit_phase(request: SecurityPhaseCommit) -> dict[str, Any]:
+def security_commit_phase(request: SecurityPhaseCommit) -> Annotated[CallToolResult, ToolOutput[SecurityScanResponse]]:
     return _security_call("security_commit_phase", **request.model_dump(exclude_none=True))
 
 
@@ -417,7 +1064,7 @@ def security_commit_phase(request: SecurityPhaseCommit) -> dict[str, Any]:
 def security_complete_scan(
     scan_id: Annotated[str, Field(min_length=1, max_length=128)],
     request_id: Annotated[str, Field(min_length=1, max_length=128)],
-) -> dict[str, Any]:
+) -> Annotated[CallToolResult, ToolOutput[SecurityScanResponse]]:
     return _security_call("security_complete_scan", scan_id=scan_id, request_id=request_id)
 
 
@@ -425,7 +1072,7 @@ def security_complete_scan(
 def security_cancel_scan(
     scan_id: Annotated[str, Field(min_length=1, max_length=128)],
     request_id: Annotated[str, Field(min_length=1, max_length=128)],
-) -> dict[str, Any]:
+) -> Annotated[CallToolResult, ToolOutput[SecurityScanResponse]]:
     return _security_call("security_cancel_scan", scan_id=scan_id, request_id=request_id)
 
 
@@ -434,7 +1081,7 @@ def security_list_findings(
     scan_id: Annotated[str, Field(min_length=1, max_length=128)],
     cursor: str | None = None,
     max_results: Annotated[int, Field(ge=1, le=500)] = 100,
-) -> dict[str, Any]:
+) -> Annotated[CallToolResult, ToolOutput[SecurityFindingsResponse]]:
     return _security_call(
         "security_list_findings",
         scan_id=scan_id,
@@ -447,7 +1094,7 @@ def security_list_findings(
 def security_export_findings(
     scan_id: Annotated[str, Field(min_length=1, max_length=128)],
     format: Literal["json", "sarif", "markdown"] = "json",
-) -> dict[str, Any]:
+) -> Annotated[CallToolResult, ToolOutput[SecurityExportResponse]]:
     return _security_call("security_export_findings", scan_id=scan_id, format=format)
 
 

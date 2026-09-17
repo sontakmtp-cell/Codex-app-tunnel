@@ -517,7 +517,7 @@ class BridgeTests(unittest.TestCase):
     def test_mcp_schema_and_ui_contract(self):
         import server
         tools=asyncio.run(server.mcp.list_tools())
-        self.assertEqual(len(tools),36)
+        self.assertEqual(len(tools),37)
         self.assertEqual(server.mcp._lowlevel_server.extensions,{"io.modelcontextprotocol/ui":{}})
         linked=[t.name for t in tools if (t.meta or {}).get("ui",{}).get("resourceUri")]
         self.assertEqual(linked,["show_control_panel","set_runtime_mode","show_security_scan_panel"])
@@ -531,7 +531,7 @@ class BridgeTests(unittest.TestCase):
         contents=list(asyncio.run(server.mcp.read_resource(server.UI_URI)))
         self.assertEqual(contents[0].mime_type,"text/html;profile=mcp-app")
         html=contents[0].content
-        for required in ("ui/initialize","ui/notifications/initialized","ui/notifications/tool-input","tools/call","ui/notifications/tool-result","2000","Normal (An toàn)","Turbo (Mở quyền)","Áp dụng đợt sửa","Hoàn tác đợt sửa"):
+        for required in ("ui/initialize","ui/notifications/initialized","ui/notifications/tool-input","tools/call","ui/notifications/tool-result","2000","Normal (An toàn)","Turbo (Mở quyền)","Áp dụng đợt sửa","Hoàn tác đợt sửa","MCP Diagnostics","Copy diagnostics"):
             self.assertIn(required,html)
         for unsafe in ("eval(","http://localhost","<script src=","/assets/"):
             self.assertNotIn(unsafe,html)

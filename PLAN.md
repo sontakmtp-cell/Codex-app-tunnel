@@ -1,525 +1,409 @@
-# Kế hoạch: Codex Security MCP App widget cho ChatGPT Web
+1. Nâng cấp Task Runner sang MCP Tasks chuẩn 2026-07-28
 
-## Tóm tắt
+Mục tiêu: chuyển hệ thống task hiện tại sang MCP Tasks extension chuẩn `2026-07-28`.
 
-- Kiểu app: `interactive-decoupled MCP App`.
-- Tạo **Security MCP App widget chạy bên trong ChatGPT Web**; giữ nguyên `control-panel-v2` local chỉ để quản trị/monitor bridge, tunnel, runtime và log.
-- Security path chạy trực tiếp `codex-security` MCP bằng Node/Python, không qua `codex.exe app-server` cho phần Security.
-- Chế độ zero-Codex-usage chỉ quảng bá `standard` và `chatgpt_deep`.
-- `native_deep` không xuất hiện trong schema, `tools/list`, mô tả tool hoặc giao diện của V1.
-- Security MCP là nguồn dữ liệu/trạng thái duy nhất; bridge đóng vai trò facade + định tuyến + kiểm tra quyền + idempotency + workflow guard; widget chỉ hiển thị/điều khiển.
-- ChatGPT Web là bộ phân tích trong `standard` và `chatgpt_deep`; native Codex workers không được tạo ở hai mode này.
+Hiện bridge đang tự quản lý:
 
-Đã xác nhận native app-only flow chạy được:
-
-```text
-open_codex_security_workspace
-        ↓ workspace.id
-submit_codex_security_setup(sessionId=workspace.id)
-        ↓
-start_codex_security_scan(sessionId=workspace.id)
-        ↓ workspace.results.scanId
-```
-
----
-
-## 1. Direct Security MCP adapter
-
-Tạo:
-
-```text
-H:\AI\Codex-app-tunnel\local-bridge\security_mcp.py
-```
-
-Adapter sẽ:
-
-- Tìm đúng `server.mjs` của plugin `codex-security` đã cài và bundled `node.exe`.
-- Chạy MCP server trực tiếp qua STDIO, không dùng shell và không gọi `codex.exe` cho Security path.
-- Gắn tiến trình vào Windows Job Object để bridge đóng thì tiến trình con cũng dừng.
-- Dùng môi trường đã làm sạch; chỉ đặt:
-  - `CODEX_SECURITY_STATE_DIR`;
-  - `CODEX_SECURITY_SCAN_ROOT`;
-  - các biến hệ thống tối thiểu cần cho Node/Python chạy.
-- Không truyền nguyên `env_vars` trong `.mcp.json` vì danh sách đó có thể chứa secret/API key.
-- Dùng allowlist native tool cố định; không có proxy tùy ý dạng `call(server, tool, arguments)`.
-- Không tự động replay mutation sau timeout.
-- Retry mutation phải dùng cùng `request_id`, kiểm tra authoritative state từ Security MCP rồi mới quyết định trả scan cũ hay thực hiện tiếp.
-
-State Security dùng:
-
-```text
-<existing state_dir>\security\
-├── workbench-state
-├── scans
-└── bridge-journal
-```
-
-### Idempotency phải bền vững
-
-Bridge phải lưu atomic mapping:
-
-```text
-request_id + payload_hash → scanId + status
-```
-
-Mapping này không chỉ giữ trong RAM. Nếu bridge chết sau khi Security MCP đã tạo scan nhưng trước khi response quay về widget, restart bridge vẫn phải nhận ra request đã được thực hiện và trả lại đúng `scanId`, không tạo scan thứ hai.
+* `start_task`
+* `get_task_run`
+* `stop_task_run`
+* trạng thái task
+* timeout
+* cancel
+* log
 
 Yêu cầu:
 
-- cùng `request_id` + cùng payload → trả lại scan cũ;
-- cùng `request_id` + khác payload → từ chối;
-- write journal theo kiểu atomic/transactional;
-- không ghi handoff token, secret hoặc path nhạy cảm vào log.
+* nghiên cứu MCP Tasks của spec 2026-07-28
+* dùng Tasks làm lifecycle chính cho các tác vụ dài
+* hỗ trợ get/update/cancel theo chuẩn MCP nếu SDK hỗ trợ
+* giữ compatibility cho các tool cũ để không làm hỏng client hiện tại
+* không phá journal, task lock, timeout và Windows process cleanup hiện có
+* Security Scan chưa cần migrate nếu gây quá nhiều thay đổi, nhưng thiết kế phải cho phép dùng chung Tasks sau này
+* request retry không được tạo task trùng
 
----
+Sau khi sửa:
 
-## 2. Security Review Orchestrator cho ChatGPT Web
+* chạy unit test
+* chạy MCP workflow thực tế
+* test start → running → completed
+* test cancel
+* test timeout
+* test reconnect/retry
+* kiểm tra task cũ vẫn dùng được
 
-Không để ChatGPT tự suy đoán workflow chỉ từ câu “hãy quét repo”. Bridge/app phải có **workflow contract cố định** để mọi lần scan đều đi đúng chuỗi phase.
+Chỉ kết luận PASS khi lifecycle task hoạt động đúng qua MCP thực tế, không chỉ dựa vào code.
 
-Có thể triển khai dưới dạng một skill/instruction nội bộ riêng, ví dụ `security-review`, hoặc instructions gắn với các facade tools. Dù dùng cách nào, workflow phải deterministic ở mức phase.
+2. Thay polling bằng MCP subscriptions/listen
 
-### Standard workflow
+Mục tiêu: bỏ hoặc giảm tối đa polling định kỳ trong `panel.html` và Security panel bằng cơ chế event-driven của MCP 2026-07-28.
 
-```text
-preflight
-  ↓
-inventory + security boundaries
-  ↓
-threat model
-  ↓
-discovery (1 pass)
-  ↓
-validation
-  ↓
-attack-path analysis cho finding hợp lệ
-  ↓
-final findings + coverage
-  ↓
-complete
-```
+Hiện panel có polling trạng thái task khoảng mỗi 2 giây.
 
-Đặc điểm:
+Hãy nghiên cứu và triển khai `subscriptions/listen` hoặc cơ chế subscription/resource update tương ứng của SDK đang dùng.
 
-- một discovery pass chính;
-- chỉ source-backed findings;
-- không kết luận từ tên file/regex đơn thuần;
-- phải validate trước khi đưa finding vào final report;
-- checkpoint sau mỗi phase.
+Thiết kế resource tối thiểu:
 
-### ChatGPT Deep workflow
+* task state
+* Security Scan state
+* change/apply state
 
-`chatgpt_deep` **không phải native Codex Deep Scan**. Đây là nhiều vòng review do ChatGPT Web tự thực hiện.
+Có thể dùng URI dạng:
 
-```text
-preflight
-  ↓
-inventory + security boundaries
-  ↓
-threat model
-  ↓
-Pass 1: attack surface / entry points / trust boundaries
-  ↓
-Pass 2: auth / authorization / secrets / data flow
-  ↓
-Pass 3: injection / file / process / network / unsafe execution / state handling
-  ↓
-deduplicate + merge candidates
-  ↓
-validation
-  ↓
-attack-path analysis
-  ↓
-final findings + coverage
-  ↓
-complete
-```
+* `bridge://task/{run_id}`
+* `bridge://scan/{scan_id}`
+* `bridge://change/{change_id}`
 
 Yêu cầu:
 
-- các pass phải độc lập đủ để giảm bỏ sót, nhưng không tạo Codex worker;
-- deduplicate trước validation;
-- checkpoint authoritative state sau mỗi pass/phase;
-- nếu chat bị ngắt, scan có thể tiếp tục từ phase gần nhất thay vì chạy lại từ đầu;
-- bridge trả `nextPhase`/phase contract để ChatGPT biết bước tiếp theo, không dựa vào trí nhớ hội thoại.
+* khi state thay đổi, panel nhận update ngay
+* không cần polling liên tục khi host hỗ trợ subscription
+* có fallback polling cho client cũ không hỗ trợ capability mới
+* không làm panel reload hoặc mở lại resource
+* không tạo event storm
+* reconnect phải lấy lại authoritative state
 
-### Workflow guard
+Kiểm tra thực tế:
 
-Bridge phải từ chối:
+* task đang chạy cập nhật log/status trên panel
+* task complete đổi trạng thái ngay
+* cancel phản ánh ngay
+* Security Scan phase thay đổi đúng
+* client legacy vẫn hoạt động
 
-- bỏ qua trực tiếp từ discovery sang complete khi chưa validation;
-- ghi dữ liệu cho phase không khớp phase hiện tại;
-- mutation vào scan đã `cancelled`, `failed` hoặc `completed`;
-- tạo scan mới khi follow-up đang mang một `scanId` hợp lệ đang chạy.
+Đo số request trước và sau để chứng minh polling đã giảm.
 
----
+3. Chuẩn hóa Structured Output cho toàn bộ MCP tools
 
-## 3. Bridge API: facade nhỏ, không expose native lifecycle hàng loạt
+Mục tiêu: chuẩn hóa output contract của toàn bộ MCP tools theo kiểu dữ liệu rõ ràng thay vì trả tự do `dict[str, Any]`.
 
-Sửa:
+Hãy:
 
-- `H:\AI\Codex-app-tunnel\local-bridge\bridge.py`
-- `H:\AI\Codex-app-tunnel\local-bridge\server.py`
+* rà soát toàn bộ tool trong `server.py`
+* tạo Pydantic response models phù hợp
+* bật structured output cho các tool thích hợp
+* chuẩn hóa error/result envelope
 
-### Public tools cho ChatGPT/Web widget
+Các field chung nên xem xét:
 
-Giữ surface nhỏ và rõ nghĩa:
+* `status`
+* `request_id`
+* `resource_uri`
+* `error_code`
+* `message`
+* `retryable`
+* `warnings`
+* `next_cursor`
 
-```text
-show_security_scan_panel()
-security_start_scan(review_mode, target, user_context?, request_id)
-security_get_scan(scan_id? | request_id?)
-security_continue_scan(scan_id)
-security_commit_phase(scan_id, phase, <phase-specific fields>, request_id)
-security_complete_scan(scan_id, request_id)
-security_cancel_scan(scan_id, request_id)
-security_list_findings(scan_id, ...)
-security_export_findings(scan_id, format)
-```
+Không ép tất cả tool dùng một schema nếu làm contract xấu; có thể dùng base model + response chuyên biệt.
 
-Không expose trực tiếp toàn bộ native lifecycle tools ra ChatGPT.
+Đặc biệt chuẩn hóa các lỗi:
 
-`security_start_scan` là app-only (`ui.visibility=["app"]`): model không thấy và không gọi tool này từ chat. Khi người dùng yêu cầu quét local project/folder trong chat, ChatGPT chỉ gọi `show_security_scan_panel`; sau click, model resolve request bằng `security_get_scan(request_id=...)`.
+* SHA mismatch
+* stale change
+* idempotency conflict
+* task unavailable
+* sandbox unavailable
+* permission denied
+* scan state conflict
+* not found
 
-### `security_start_scan`
+Yêu cầu:
 
-Hợp đồng cố định:
+* không phá compatibility không cần thiết
+* schema phải được MCP host discover đúng
+* model không phải đoán field hoặc parse text lỗi
+* error không được làm mất thông tin kỹ thuật cần debug
 
-```json
-{
-  "review_mode": "standard | chatgpt_deep",
-  "target": "codebase | changes",
-  "user_context": "optional",
-  "request_id": "required"
-}
-```
+Test:
 
-Kết quả bắt buộc:
+* inspect `tools/list`
+* gọi các tool thành công
+* cố tình tạo các lỗi phổ biến
+* xác nhận structured output đúng schema
+* chạy test legacy hiện tại.
 
-```json
-{
-  "scanId": "UUID từ Security MCP",
-  "reviewMode": "standard hoặc chatgpt_deep",
-  "target": "codebase hoặc changes",
-  "status": "running",
-  "phase": "preflight",
-  "nextPhase": "inventory",
-  "updatedAt": "..."
-}
-```
+4. Thêm MCP Protocol Diagnostics vào Control Panel
 
-Bridge phải lấy đúng:
+Mục tiêu: thêm tab hoặc section `MCP Diagnostics` vào control panel để debug trực tiếp trạng thái protocol giữa ChatGPT và bridge.
 
-```text
-workspace.results.scanId
-```
+Hiển thị tối thiểu:
 
-Nếu không có `scanId` hợp lệ thì trả lỗi và không báo đã bắt đầu scan.
+* MCP protocol version
+* Python MCP SDK version
+* bridge version
+* server capabilities
+* client capabilities nếu biết
+* Apps support
+* Tasks support
+* subscriptions support
+* structured output support
+* cache hints support
+* legacy compatibility mode
+* connected/disconnected
+* runtime state
+* current project
+* resource URI đang dùng
 
-### Mapping mode
+Nếu MCP 2026-07-28 dùng discovery/capability mechanism mới, hiển thị dữ liệu authoritative từ protocol thay vì hard-code.
 
-- `standard` + `codebase` → native workspace mode `standard`.
-- `standard` + `changes` → native workspace mode `diff`.
-- `chatgpt_deep` + `codebase` → native workspace mode `standard`, ChatGPT Web chạy workflow nhiều pass ở trên.
-- `chatgpt_deep` + `changes` → native workspace mode `diff`, ChatGPT Web chạy workflow nhiều pass ở trên.
+Thêm nút:
+`Copy diagnostics`
 
-Không truyền `model` hoặc `reasoningEffort` vào native app-only start.
+Output phải dễ gửi cho agent để debug.
 
-### Target
+Không hiển thị:
 
-- `codebase`: toàn bộ project cố định trong `project-path.txt`.
-- `changes`: working tree hiện tại với `diffTarget.kind = "working_tree"`.
-- Không cho ChatGPT/widget truyền arbitrary path.
-- Nếu project không phải Git hoặc Security báo không hỗ trợ review changes thì khóa `changes`.
+* token
+* secret
+* tunnel credential
+* nội dung `.env`
 
-### `security_continue_scan`
+Test trên ChatGPT Web thật hoặc MCP host tương đương và xác nhận dữ liệu phản ánh capability thực tế.
 
-Tool này đọc authoritative state và trả:
+5. Triển khai MCP Cache Hints
 
-```text
-scanId
-status
-currentPhase
-nextPhase
-phaseInstructions
-coverageSoFar
-findingCounts
-resumeToken/opaque state nếu thực sự cần nội bộ
-```
+Mục tiêu: tận dụng cache hints của MCP 2026-07-28 để giảm request không cần thiết mà không làm state bị stale.
 
-Không trả path nhạy cảm, handoff token hoặc internal secret.
+Rà soát:
 
-ChatGPT phải dùng kết quả này để biết chính xác bước tiếp theo thay vì tự đoán.
+* tools metadata
+* resources
+* HTML Apps resources
+* immutable change diff
+* project state
+* task state
+* Security Scan state
 
-### `security_commit_phase`
+Phân loại rõ:
 
-Đây là facade ghi checkpoint. Input phải là **discriminated union theo `phase`**, không có trường `payload` free-form.
+* immutable / cache lâu
+* semi-static
+* dynamic / không cache
 
-Ví dụ các nhánh schema:
+Ví dụ:
 
-- `threat_model` → `threatModel`;
-- `discovery` / deep pass → `candidates`, `coverage`;
-- `validation` → `validations`;
-- `attack_path` → `attackPaths`;
-- `finalization` → `findings`, `coverage`.
+* panel HTML: cache tương đối lâu
+* tool metadata: cache
+* completed saved diff: cache lâu
+* project_info: cache ngắn hoặc không cache
+* running task: không cache
+* scan đang chạy: không cache
 
-Bridge tự map xuống native actions tương ứng như:
+Dùng `ttlMs`, `cacheScope` hoặc API tương ứng đúng với SDK/spec thực tế.
 
-```text
-security_update_scan_context
-security_update_scan_progress
-security_record_scan_draft
-security_prepare_review_items
-security_record_candidates
-security_record_candidate_validations
-security_record_attack_paths
-security_set_finding_remediation
-...
-```
+Yêu cầu:
 
-Các native action này là implementation detail và **không xuất hiện trong external `tools/list`**.
+* không hard-code field không được SDK hỗ trợ
+* legacy clients vẫn hoạt động
+* state động không được trả dữ liệu stale
 
-`start_codex_security_standard_scan`, `start_codex_security_deep_scan` và các action yêu cầu Codex thread/sandbox metadata không được expose ra ChatGPT Web.
+Thêm test kiểm tra metadata/cache hint thực tế qua MCP.
 
----
+6. Thay Turbo global bằng Temporary Permission Grants
 
-## 4. Security MCP App widget trong ChatGPT
+Hiện Turbo cho quyền rất rộng sau khi bật.
 
-Tạo:
+Mục tiêu: giữ Turbo compatibility nhưng bổ sung hệ thống quyền tạm thời granular hơn.
 
-```text
-H:\AI\Codex-app-tunnel\local-bridge\security_scan_panel.html
-```
+Các capability nên tách:
 
-Đăng ký resource riêng:
+* shell execution
+* network access
+* read ngoài project
+* write ngoài project
 
-```text
-ui://local-bridge/security-scan-v1.html
-```
+Cho phép scope:
 
-### Phân biệt rõ hai UI
+* một command
+* một task
+* 5 phút
+* 10 phút
+* đến khi user tắt
 
-```text
-Local Control Panel (`control-panel-v2`)
-→ quản trị tunnel/runtime/log/bridge health
+Yêu cầu:
 
-Security MCP App Widget (`security-scan-v1`)
-→ chạy bên trong ChatGPT Web
-→ tạo/quan sát/hủy Security scan
-```
+* Normal vẫn là mặc định
+* quyền phải do user xác nhận trực tiếp trong panel
+* restart bridge phải revoke permission tạm thời
+* expiration phải enforce ở backend, không chỉ UI
+* model không được tự grant quyền
+* panel hiển thị rõ capability nào đang bật và còn bao lâu
+* command vượt scope phải bị từ chối
+* tunnel/API secret vẫn không được truyền xuống child process
 
-Không gọi cả hai là “panel” trong code/comment nếu dễ gây nhầm.
+Giữ `Turbo` như full-access compatibility mode nếu cần, nhưng khuyến khích granular permission trong UI.
 
-### Giao diện Security widget
+Test cả success, expiry, revoke và bypass attempt.
 
-> **Ghi chú thiết kế:** Security MCP App Widget phải có phong cách hình ảnh và ngôn ngữ thiết kế **nhất quán với panel hiện hữu `control-panel-v2`**. Ưu tiên tái sử dụng cùng hệ thống màu, typography, spacing, border radius, card, button, trạng thái, icon, mật độ thông tin và dark-mode treatment để người dùng cảm nhận đây là hai bề mặt của cùng một sản phẩm, không phải hai ứng dụng tách rời. Có thể mô phỏng bố cục của Codex Security native UI, nhưng không được đánh đổi tính nhất quán với giao diện bridge hiện hữu.
+7. Nâng Change Engine hỗ trợ Rename/Delete/Mkdir
 
-Mô phỏng ảnh tham khảo:
+Mục tiêu: mở rộng hệ thống change hiện tại để agent có thể refactor project đầy đủ nhưng vẫn giữ workflow an toàn:
 
-- “Lần quét mới”.
-- Hai lựa chọn `Cơ sở mã` và `Thay đổi`.
-- Thông tin repo/branch/commit ở chế độ chỉ đọc.
-- Hai review mode:
-  - `Standard`;
-  - `ChatGPT Deep`.
-- Không có model selector của Codex.
-- Hiển thị “ChatGPT Web” là bộ phân tích hiện tại.
-- Ô ngữ cảnh bổ sung, giới hạn kích thước.
-- Nút `Bắt đầu quét`.
-- Trạng thái phase/progress/finding count.
-- Nút hủy khi scan đang chạy.
+`prepare → preview → apply → undo`
 
-Widget dùng MCP Apps bridge trước:
+Thêm operation:
 
-- `ui/notifications/tool-result`;
-- `tools/call`;
-- `ui/message`.
+* create file
+* update file
+* delete file
+* rename/move file
+* create directory
+* nếu hợp lý: remove empty directory
 
-`window.openai.callTool` và `window.openai.sendFollowUpMessage` chỉ là compatibility fallback.
+Yêu cầu:
 
-### Widget state không phải persistence
+* SHA validation trước khi delete/rename
+* không overwrite file đích ngoài ý muốn
+* chống path traversal
+* chống symlink/junction/hardlink bypass
+* preserve line endings/file bytes cho file không bị sửa
+* multi-file batch vẫn hỗ trợ rollback/recovery
+* rename + edit trong cùng batch phải có behavior xác định
+* undo phải phục hồi đúng tên và nội dung cũ
+* crash giữa batch phải recover được
+* Git index không được tự sửa
 
-Widget chỉ lưu state trình bày tạm thời:
+Thêm test:
 
-```json
-{
-  "selectedMode": "...",
-  "selectedTarget": "...",
-  "scanId": "...",
-  "requestId": "..."
-}
-```
+* rename
+* delete
+* mkdir
+* rename conflict
+* stale SHA
+* crash recovery
+* undo batch nhiều loại operation.
 
-Không coi `window.openai.widgetState`/iframe state là storage bền vững.
+8. Security Scan Incremental + Finding Baseline
 
-Khi widget được mở hoặc mở lại:
+Mục tiêu: nâng Security MCP để scan sau có thể so với scan trước thay vì luôn xem mọi finding là mới.
 
-```text
-show_security_scan_panel
-        ↓
-Security MCP authoritative state
-        ↓
-activeScan / latestScan / repo metadata
-```
+Tạo fingerprint ổn định cho finding dựa trên các yếu tố phù hợp:
 
-`show_security_scan_panel` phải trả ít nhất:
+* rule/type
+* file
+* source location
+* normalized evidence
+* semantic identity của vulnerability
 
-```text
-repo metadata
-supportedTargets
-activeScan (nếu có)
-latestScan (nếu có)
-```
+Phân loại:
 
-Status, findings, progress, completion luôn đọc lại từ Security MCP.
+* NEW
+* UNCHANGED
+* FIXED
+* REGRESSED
 
----
+Yêu cầu:
 
-## 5. Luồng bắt buộc khi bấm “Bắt đầu quét”
+* line number thay đổi nhẹ không được làm finding hoàn toàn mới nếu vulnerability vẫn cùng bản chất
+* source location vẫn phải chính xác
+* không fallback line 1 vô nghĩa
+* baseline phải gắn với project/fingerprint phù hợp
+* scan của project khác không được trộn
+* export JSON/SARIF/Markdown chứa trạng thái baseline
+* panel cho filter New / Existing / Fixed / Regressed
 
-```text
-1. Widget tạo `request_id` và bộ arguments một lần.
-2. Trong cùng lượt click, trước khi chờ response nào, widget dispatch song song:
-   - `tools/call` → `security_start_scan` với bộ arguments đó;
-   - `ui/message` với đúng `request_id` và bộ arguments đó.
-3. `security_start_scan` là app-only; widget nhận `structuredContent.scanId` và lưu `scanId/requestId` cho UI.
-4. ChatGPT không gọi/replay `security_start_scan`; ChatGPT dùng `security_get_scan(request_id)` để lấy cùng `scanId` authoritative từ request của widget.
-5. ChatGPT gọi `security_continue_scan(scanId)` để lấy `nextPhase`.
-6. ChatGPT thực hiện phase theo workflow contract.
-7. ChatGPT checkpoint bằng `security_commit_phase(...)`.
-8. Lặp continue → work → commit cho tới finalization.
-9. ChatGPT gọi `security_complete_scan(scanId)`.
-```
+Nếu khả thi, thêm incremental scan:
 
-Nội dung `ui/message` phải được dispatch đồng bộ với cú click và có dạng tương đương:
+* ưu tiên file thay đổi từ scan trước
+* vẫn mở rộng dependency liên quan khi cần
+* phải có full-scan fallback
 
-```text
-Người dùng vừa nhấn nút Bắt đầu quét trong Security MCP App.
-Widget đã dispatch app-only security_start_scan với request_id=<request_id>.
-Không gọi security_start_scan từ model. Hãy gọi security_get_scan(request_id=<request_id>), retry nếu còn pending, rồi tuân thủ workflow phase của bridge tới security_complete_scan.
-Không dùng native Deep/Codex worker.
-```
+Test bằng fixture:
 
-Nếu `ui/message` thất bại:
+1. tạo vulnerability
+2. scan
+3. scan lại không sửa
+4. sửa vulnerability
+5. scan lại
+6. tái tạo vulnerability
 
-- Không tạo scan lần hai.
-- Widget vẫn hiển thị scan đang chạy.
-- Giữ nguyên `scanId` và `request_id`.
-- Cho phép gửi lại message mà không gọi lại `security_start_scan`.
-- Khi mở lại widget, lấy scan đang chạy từ server thay vì tin widget state cũ.
+Xác nhận state chuyển đúng.
 
----
+9. Project Profile Auto-Detect
 
-## 6. Cancel và terminal-state write guard
+Hiện task riêng của project cần profile cấu hình thủ công.
 
-Khi bấm `Hủy`:
+Mục tiêu: khi bridge mở project mới, tự phát hiện stack và đề xuất profile.
 
-```text
-Widget
-  ↓
-security_cancel_scan(scanId, request_id)
-  ↓
-Security MCP → status=cancelled
-```
+Detect tối thiểu:
 
-Không giả định thao tác này có thể ngay lập tức dừng một lượt reasoning ChatGPT đang chạy trong host.
-
-Do đó bridge phải enforce:
-
-```text
-Nếu scan.status ∈ {cancelled, failed, completed}
-→ từ chối mọi mutation tiếp theo
-→ không nhận progress mới
-→ không nhận candidate/finding mới
-→ không cho complete lần nữa
-```
-
-Nếu một lượt ChatGPT cũ vẫn chạy sau khi người dùng hủy, các write tiếp theo phải nhận lỗi terminal-state rõ ràng và dừng workflow.
-
-Cancel phải idempotent: gọi lại cùng request không tạo side effect mới.
-
----
-
-## 7. Kiểm thử và cổng nghiệm thu
-
-### Gate 1 — Direct MCP
-
-- Khởi tạo Security MCP thành công.
-- Internal `tools/list` nhận đủ native tools cần thiết.
-- App-only sequence tạo được `workspace.id` và `workspace.results.scanId`.
-- Standard/ChatGPT Deep không gọi `start_codex_security_deep_scan`.
-- Standard/ChatGPT Deep không tạo `CodexSdkWorkerExecutor` hoặc native Codex model worker.
-- Nếu có metric usage đáng tin cậy, xác nhận Codex usage không tăng trong Standard/ChatGPT Deep.
-- Secret không xuất hiện trong môi trường/log.
-- Plugin thiếu hoặc sai path thì fail-closed.
-
-> Không dùng tiêu chí “không có `codex.exe` trong process tree” làm bằng chứng zero-Codex-usage, vì bridge có thể đang dùng Codex App Server cho các chức năng khác như đọc/search source.
-
-### Gate 2 — Bridge contract
-
-- `security_start_scan` trả `scanId` không rỗng.
-- Retry cùng `request_id` + cùng payload trả scan cũ kể cả sau restart bridge.
-- Retry cùng `request_id` + khác payload bị từ chối.
-- Mode ngoài allowlist bị từ chối trước khi gọi native MCP.
-- `native_deep` không xuất hiện trong external `tools/list`.
-- Native lifecycle tool thấp tầng không xuất hiện trong external `tools/list`.
-- Không trả `scanDir`, handoff token, sandbox metadata hoặc path nhạy cảm ra widget/model nếu không cần.
-- `security_continue_scan` trả đúng `nextPhase` theo authoritative state.
-- `security_commit_phase` từ chối phase sai thứ tự.
-- Scan terminal từ chối mọi mutation.
-
-### Gate 3 — Workflow
-
-#### Standard
-
-- Đi đúng chuỗi preflight → inventory → threat model → discovery → validation → attack path → finalization → complete.
-- Không complete nếu chưa validation.
-- Checkpoint tồn tại sau mỗi phase.
-- Resume sau gián đoạn tiếp tục từ phase gần nhất.
-
-#### ChatGPT Deep
-
-- Chạy đủ 3 pass đã định nghĩa.
-- Không tạo Codex workers.
-- Deduplicate candidates trước validation.
-- Checkpoint sau từng pass.
-- Resume không chạy lại các pass đã commit thành công.
-
-### Gate 4 — Widget
-
-- Widget xuất hiện trong ChatGPT App iframe.
-- `control-panel-v2` local vẫn hoạt động độc lập.
-- Bấm Standard và ChatGPT Deep đều gọi đúng `security_start_scan`.
-- `security_start_scan` chỉ callable từ widget sau click; model/chat không được gọi trực tiếp.
-- Nút widget dispatch `security_start_scan` và `ui/message` trong cùng lượt click; `request_id`/arguments khớp tuyệt đối.
-- ChatGPT tự tiếp tục từ kết quả `security_start_scan`; người dùng không cần gửi thêm lệnh trong chat.
-- Polling cập nhật đúng authoritative scan.
-- Mở lại widget lấy `activeScan/latestScan` từ Security MCP, không phụ thuộc widget state.
-- Nút hủy không tạo scan mới.
-- Sau khi hủy, write từ lượt ChatGPT cũ bị bridge từ chối.
-
-### Gate 5 — ChatGPT Web thật
-
-- Refresh app sau khi đổi tool/resource.
-- Nếu host vẫn giữ resource hoặc behavior cũ sau khi refresh, remove/reinstall plugin MCP Bridge local trong ChatGPT Web, mở lại chat/widget rồi kiểm tra lại; đây là bước loại cache plugin/host, không thay đổi kiến trúc MCP.
-- Text request “quét bảo mật thư mục local” chỉ gọi `show_security_scan_panel`; không gọi `security_start_scan` trước khi người dùng bấm nút.
-- Sau khi người dùng bấm nút trong widget, `security_start_scan` được gọi app-only và ChatGPT dùng `security_get_scan(request_id=...)` để lấy scanId.
-- Nút widget gửi message vào đúng phiên chat.
-- ChatGPT tiếp tục dùng đúng `scanId`.
-- ChatGPT gọi `security_continue_scan`/`security_commit_phase` theo workflow contract.
-- Xác nhận end-to-end qua ChatGPT Web thật; `healthz/readyz` riêng lẻ không được tính là nghiệm thu connector.
-
----
-
-## 8. Giả định đã khóa
-
-- V1 là app private dùng tunnel/developer mode, không phải public submission.
-- `standard` và `chatgpt_deep` dùng ChatGPT Web để reasoning; usage ChatGPT vẫn bị tính, Codex model usage không được dùng bởi Security workflow V1.
-- Native Deep nằm ngoài V1 và chỉ có thể là profile riêng sau này, có cảnh báo usage rõ ràng và trust/sandbox contract hợp lệ.
-- Không thêm repo dropdown; project vẫn lấy từ `project-path.txt`.
-- Không cho widget/model truyền arbitrary repository path.
-- Không sửa hoặc ghi đè các thay đổi đang có trong worktree ngoài các file được task triển khai cho phép.
-- Security MCP là source of truth cho scan/status/findings/coverage.
-- Widget state chỉ phục vụ presentation.
-- Bridge facade chịu trách nhiệm workflow guard, idempotency và chống ghi vào terminal scan.
-- Tài liệu triển khai bám theo OpenAI Apps SDK UI và OpenAI MCP server guidance.
+* `package.json`
+* `pyproject.toml`
+* `requirements.txt`
+* `pytest`
+* `Cargo.toml`
+* `go.mod`
+* `CMakeLists.txt`
+* `.sln`
+* `.csproj`
+
+Từ đó đề xuất các task phù hợp như:
+
+* test
+* lint
+* build
+* typecheck
+
+Quan trọng:
+
+* chỉ đề xuất, không tự chạy
+* không cho model tự thêm command tùy ý
+* user phải duyệt task trong panel
+* executable và args sau khi duyệt phải trở thành fixed allowlist
+* không đọc script nguy hiểm rồi tự chạy
+* detect package manager hợp lý
+* hỗ trợ project monorepo cơ bản
+
+Thêm UI:
+`Detected project`
+`Suggested tasks`
+`Approve`
+`Ignore`
+
+Sau khi approve, lưu project profile ngoài source project như kiến trúc hiện tại.
+
+Test ít nhất Python, Node và một project không nhận diện được.
+
+10. Thêm Local Code Intelligence bằng Tree-sitter/LSP
+
+Mục tiêu: giúp ChatGPT hiểu codebase nhanh hơn thay vì chỉ dựa vào `list_files`, `read_file` và literal `search_code`.
+
+Ưu tiên local deterministic tooling, không gọi thêm AI.
+
+Thêm các capability:
+
+* `file_outline(path)`
+* `find_symbol(name)`
+* `find_references(symbol)`
+* `project_symbols(query)`
+* nếu khả thi: `go_to_definition`
+
+Có thể dùng:
+
+* Tree-sitter
+* LSP đang có trong project
+* hoặc hybrid
+
+Yêu cầu:
+
+* bắt đầu với Python, JS/TS nếu cần giới hạn scope
+* response trả file + line/startLine/endLine chính xác
+* hoạt động với file chưa commit
+* không index `.git`, dependency lớn, build output, secrets
+* incremental re-index khi file thay đổi
+* giới hạn RAM/CPU
+* fallback sang `search_code` nếu parser/LSP không hỗ trợ ngôn ngữ đó
+* không bắt buộc user cài IDE extension riêng
+
+Tích hợp vào MCP tool discovery rõ ràng.
+
+Test bằng fixture có:
+
+* class
+* function
+* duplicate symbol names
+* imports
+* references nhiều file
+
+So source location với file thật và chỉ PASS nếu định vị hữu ích.
