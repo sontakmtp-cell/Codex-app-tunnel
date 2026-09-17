@@ -1,8 +1,0 @@
-| Skill | Chức năng chính |
-|---|---|
-| `solidworks-automation` | Skill lõi: kết nối SolidWorks, tạo/sửa Part, Assembly, Motion, xuất STEP/PDF/DXF, BOM và tự kiểm tra kết quả. |
-| `solidworks-vibecad` | Biến mô tả tiếng Việt/tự nhiên thành kế hoạch thiết kế tham số và kế hoạch thực hiện. |
-| `solidworks-fillet-chamfer-cnc` | Tạo và kiểm tra bo góc, vát mép cho chi tiết CNC; chú ý chọn đúng cạnh và khả năng gia công. |
-| `solidworks-threaded-holes` | Tạo lỗ ren hệ mét M3–M12, lỗ mù/lỗ xuyên, lỗ khoan mồi, ren thật hoặc ren trang trí. |
-| `solidworks-engineering-drawing` | Tạo và kiểm tra bản vẽ kỹ thuật, khung tên, hình chiếu, kích thước, bảng lỗ, BOM và PDF. |
-| `autocad-automation` | Skill phụ cho AutoCAD 2D: DWG/DXF, layer, đường nét, chữ, kích thước, xuất bản vẽ và kiểm tra. |
