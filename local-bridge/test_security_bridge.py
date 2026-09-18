@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from bridge import LocalBridge
 from files import BridgeConfig, BridgeError
+from security_mcp import SecurityMcpTimeout
 
 
 class RuntimeStub:
@@ -155,6 +156,42 @@ class ZeroFindingSecurityAdapter(DirectSecurityAdapter):
         }
 
 
+class TimeoutCommitSecurityAdapter(DirectSecurityAdapter):
+    def __init__(self, root):
+        super().__init__(root)
+        self.commit_results = {}
+        self.timeout_once = True
+
+    def commit_phase(self, scan_id, phase, phase_data, request_id):
+        if request_id in self.commit_results:
+            return self.commit_results[request_id]
+        result = super().commit_phase(scan_id, phase, phase_data, request_id)
+        self.commit_results[request_id] = result
+        if self.timeout_once:
+            self.timeout_once = False
+            raise SecurityMcpTimeout("native result is unknown")
+        return result
+
+
+class TimeoutStartSecurityAdapter(DirectSecurityAdapter):
+    def __init__(self, root):
+        super().__init__(root)
+        self.timeout_once = True
+
+    def start_scan(self, mode, target, user_context, request_id):
+        result = super().start_scan(mode, target, user_context, request_id)
+        if self.timeout_once:
+            self.timeout_once = False
+            raise SecurityMcpTimeout("native start result is unknown")
+        return result
+
+
+class TimeoutFindingsSecurityAdapter(DirectSecurityAdapter):
+    def list_findings(self, scan_id, cursor, limit):
+        self.calls.append(("list_findings", cursor, limit))
+        raise SecurityMcpTimeout("native findings result is unavailable")
+
+
 class SecurityBridgeTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="security-bridge-test-")
@@ -271,6 +308,53 @@ class SecurityBridgeTests(unittest.TestCase):
         finally:
             bridge.close()
 
+    def test_completed_scan_reads_cached_findings_and_aggregates(self):
+        adapter = TimeoutFindingsSecurityAdapter(self.root)
+        bridge = self.new_bridge("completed-cache-state", adapter)
+        try:
+            all_findings = [
+                {"id": f"F{index}", "title": "finding", "severity": "low",
+                 "file": "src/app.py", "line": index + 1}
+                for index in range(205)
+            ]
+            started = bridge.security_start_scan("standard", "codebase", request_id="cache-start-001")
+            phase_data = {
+                "preflight": {"coverage": {"files": 2}},
+                "inventory": {"inventory": [{"path": "src/app.py"}], "coverage": {"files": 2}},
+                "threat_model": {"threatModel": {"threats": []}},
+                "discovery": {"candidates": [], "coverage": {"files": 2}},
+                "validation": {"validations": [], "coverage": {"validated": 2}},
+                "attack_path": {"attackPaths": [], "coverage": {"paths": 0}},
+                "finalization": {
+                    "findings": all_findings,
+                    "coverage": {"complete": True, "files": 2},
+                },
+            }
+            for index, (phase, fields) in enumerate(phase_data.items(), start=1):
+                bridge.security_commit_phase(
+                    started["scanId"], phase, request_id=f"cache-phase-{index}", **fields
+                )
+
+            completed = bridge.security_complete_scan(started["scanId"], "cache-complete-001")
+            self.assertEqual(completed["status"], "completed")
+            self.assertEqual(completed["findingCounts"]["total"], 205)
+            self.assertEqual(completed["coverageSoFar"]["files"], 2)
+
+            first_page = bridge.security_list_findings(started["scanId"], limit=100)
+            self.assertEqual(first_page["total"], 205)
+            self.assertEqual(first_page["findings"][0]["id"], "F0")
+            self.assertEqual(first_page["nextCursor"], 100)
+            second_page = bridge.security_list_findings(started["scanId"], cursor=100, limit=100)
+            self.assertEqual(second_page["findings"][0]["id"], "F100")
+            self.assertEqual(second_page["nextCursor"], 200)
+            third_page = bridge.security_list_findings(started["scanId"], cursor=200, limit=100)
+            self.assertEqual(len(third_page["findings"]), 5)
+            self.assertEqual(third_page["findings"][-1]["id"], "F204")
+            self.assertIsNone(third_page["nextCursor"])
+            self.assertEqual([call for call in adapter.calls if isinstance(call, tuple) and call[0] == "list_findings"], [])
+        finally:
+            bridge.close()
+
     def test_restart_retry_is_atomic_and_payload_conflict_is_rejected(self):
         first = self.bridge.security_start_scan("standard", "codebase", "same context", "restart-001")
         # Simulate a crash after the direct adapter created the scan but before
@@ -323,6 +407,49 @@ class SecurityBridgeTests(unittest.TestCase):
             self.bridge.security_get_scan()
         with self.assertRaisesRegex(BridgeError, "exactly one"):
             self.bridge.security_get_scan(started["scanId"], "widget-start-001")
+
+    def test_commit_timeout_is_recoverable_and_retry_is_idempotent(self):
+        adapter = TimeoutCommitSecurityAdapter(self.root)
+        bridge = self.new_bridge("timeout-state", adapter)
+        try:
+            started = bridge.security_start_scan("standard", "codebase", request_id="timeout-start-001")
+            with self.assertRaisesRegex(BridgeError, "SECURITY_RUNTIME_TIMEOUT"):
+                bridge.security_commit_phase(
+                    started["scanId"], "preflight", request_id="timeout-phase-001",
+                    coverage={"files": 1}
+                )
+
+            native_calls = list(adapter.calls)
+            recovered = bridge.security_get_scan(started["scanId"])
+            self.assertTrue(recovered["recoveryRequired"])
+            self.assertEqual(recovered["recoveryRequestId"], "timeout-phase-001")
+            self.assertEqual(recovered["phase"], "preflight")
+            self.assertEqual(adapter.calls, native_calls)
+
+            retried = bridge.security_commit_phase(
+                started["scanId"], "preflight", request_id="timeout-phase-001", coverage={"files": 1}
+            )
+            self.assertEqual(retried["phase"], "inventory")
+            self.assertEqual(retried["committedPhase"], "preflight")
+            self.assertFalse(retried["recoveryRequired"])
+            self.assertEqual(len([call for call in adapter.calls if isinstance(call, tuple) and call[0] == "commit_phase"]), 1)
+            self.assertEqual(retried["phaseHistory"][0]["requestId"], "timeout-phase-001")
+        finally:
+            bridge.close()
+
+    def test_start_timeout_blocks_new_scan_and_retries_without_duplicate(self):
+        adapter = TimeoutStartSecurityAdapter(self.root)
+        bridge = self.new_bridge("timeout-start-state", adapter)
+        try:
+            with self.assertRaisesRegex(BridgeError, "SECURITY_RUNTIME_TIMEOUT"):
+                bridge.security_start_scan("standard", "codebase", request_id="timeout-start-001")
+            with self.assertRaisesRegex(BridgeError, "SECURITY_SCAN_ACTIVE"):
+                bridge.security_start_scan("standard", "codebase", request_id="other-start-001")
+            retry = bridge.security_start_scan("standard", "codebase", request_id="timeout-start-001")
+            self.assertEqual(retry["scanId"], "scan-0001")
+            self.assertEqual(len(adapter.start_calls), 1)
+        finally:
+            bridge.close()
 
     def test_safe_findings_export_panel_and_terminal_cancel_idempotency(self):
         started = self.bridge.security_start_scan("standard", "codebase", request_id="safe-001")

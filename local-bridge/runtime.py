@@ -98,7 +98,10 @@ def process_overrides(root: Path, cache: Path, runtime_roots: list[Path],
         for pattern in patterns:
             for name in (pattern, "**/"+pattern):
                 fs[str(base / name)] = "deny"
-    settings["permissions.bridge.filesystem"] = "{glob_scan_max_depth=32," + ",".join(
+    # ponytail: cap Windows deny-glob expansion at four levels; fixed bridge tasks/read helpers
+    # do not expose an arbitrary normal shell. Replace with compact deny-path support when the
+    # upstream Windows helper can enforce recursive rules without a command-line payload.
+    settings["permissions.bridge.filesystem"] = "{glob_scan_max_depth=4," + ",".join(
         json.dumps(k) + "=" + json.dumps(v) for k, v in fs.items()) + "}"
     settings["shell_environment_policy.set"] = "{" + ",".join(
         json.dumps(k) + "=" + json.dumps(v) for k, v in clean_environment(cache).items()) + "}"
@@ -125,6 +128,7 @@ class AppServer:
         self.error = None
         self.command_ready = False
         self.command_error = "NOT_VERIFIED: run the runtime doctor."
+        self.last_rpc_error = None
         self.execution_mode = "normal"
         self.methods = set()
 
@@ -134,6 +138,7 @@ class AppServer:
 
     def start(self):
         self.execution_mode = "normal"
+        self.last_rpc_error = None
         exe = find_codex(self.executable)
         cache = self.state / "cache"
         cache.mkdir(parents=True, exist_ok=True)
@@ -274,6 +279,7 @@ class AppServer:
 
     def verify_policy(self):
         """Canaries, not private user files. Refuse commands unless all checks pass."""
+        self.last_rpc_error = None
         token = uuid.uuid4().hex
         script = self.state / "cache" / ("probe-" + token + ".py")
         script.write_text(
@@ -302,7 +308,8 @@ class AppServer:
             if str(exc).startswith("RUNTIME_TIMEOUT"):
                 self.close()
             self.command_ready = False
-            self.command_error = "Windows refused the protected process or its canaries failed; no unsafe fallback."
+            detail = self.last_rpc_error or str(exc)
+            self.command_error = "POLICY_CHECK_FAILED: " + detail[:2000] + "; no unsafe fallback."
         finally:
             script.unlink(missing_ok=True)
             if self.policy_probe:

@@ -1,21 +1,36 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from functools import partial, wraps
+import hashlib
 from importlib.metadata import PackageNotFoundError, version as package_version
 import json
 import logging
 from pathlib import Path
 import sys
+import threading
 from typing import Annotated, Any, Generic, Literal, TypeVar, Union
 
 import anyio
 from mcp.server.lowlevel.server import MODERN_PROTOCOL_VERSIONS
 from mcp.server import MCPServer
 from mcp.server.apps import Apps, ResourceCsp
+from mcp.server.extension import Extension, MethodBinding
 from mcp.server.mcpserver.context import Context
 from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
-from mcp.types import CallToolResult, TextContent, ToolAnnotations
+from mcp.shared.exceptions import MCPError
+from mcp.shared.subscriptions import event_matches, event_to_notification
+from mcp.types import (
+    CallToolResult,
+    RequestParams,
+    SubscriptionsListenResult,
+    SubscriptionFilter,
+    TextContent,
+    ToolAnnotations,
+)
 from pydantic import BaseModel, ConfigDict, Field, RootModel, ValidationError
 
 from bridge import LocalBridge
@@ -29,6 +44,7 @@ TURBO_RUN = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotent
 DOCS = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True)
 UI_URI = "ui://local-bridge/control-panel-v2.html"
 SECURITY_UI_URI = "ui://local-bridge/security-scan-v1.html"
+TASKS_EXTENSION_ID = "io.modelcontextprotocol/tasks"
 DATA_META = {"ui":{"visibility":["model","app"]}, "openai/widgetAccessible":True}
 APP_CALL_META = {
     "ui": {"resourceUri": UI_URI, "visibility": ["model", "app"]},
@@ -200,6 +216,11 @@ class RuntimeModeResponse(SuccessResponse):
     project: ProjectInfo
 
 
+class RuntimeReconnectResponse(SuccessResponse):
+    reconnected: bool
+    project: ProjectInfo
+
+
 class BashResponse(SuccessResponse):
     mode: Literal["turbo"]
     exit_code: int | None = None
@@ -215,14 +236,32 @@ class SearchMatch(PayloadModel):
     context_start_line: int
     context: str
     sha256: str
+    patterns: list[str] = Field(default_factory=list)
 
 
 class SearchResponse(SuccessResponse):
     matches: list[SearchMatch]
-    next_cursor: int | None = None
+    next_cursor: int | str | None = None
     inventory_truncated: bool
     output_truncated: bool
+    scanned_files: int = 0
+    scan_truncated: bool = False
     hint: str
+
+
+class SecurityInventoryItem(PayloadModel):
+    path: str
+    category: Literal["source", "config"]
+    size: int
+
+
+class SecurityInventoryResponse(SuccessResponse):
+    workspace_root: str
+    files: list[SecurityInventoryItem]
+    next_cursor: int | None = None
+    truncated: bool
+    summary: dict[str, int]
+    skipped: dict[str, int]
 
 
 class TaskDefinition(PayloadModel):
@@ -268,6 +307,49 @@ class RunTaskResponse(TaskRunStatusResponse):
     stdout: str
     stderr: str
     command: list[str]
+
+
+class MCPTaskGetParams(RequestParams):
+    task_id: str = Field(min_length=1, max_length=128)
+
+
+class MCPTaskUpdateParams(RequestParams):
+    task_id: str = Field(min_length=1, max_length=128)
+    input_responses: dict[str, Any]
+
+
+class MCPTaskCancelParams(RequestParams):
+    task_id: str = Field(min_length=1, max_length=128)
+
+
+class MCPTaskSubscriptionFilter(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    tools_list_changed: bool | None = Field(default=None, alias="toolsListChanged")
+    prompts_list_changed: bool | None = Field(default=None, alias="promptsListChanged")
+    resources_list_changed: bool | None = Field(default=None, alias="resourcesListChanged")
+    resource_subscriptions: list[str] | None = Field(default=None, alias="resourceSubscriptions")
+    task_ids: list[str] | None = Field(default=None, alias="taskIds")
+
+
+class MCPSubscriptionsListenParams(RequestParams):
+    notifications: MCPTaskSubscriptionFilter
+
+
+@dataclass(frozen=True)
+class MCPTaskStatusEvent:
+    task_id: str
+    state: dict[str, Any]
+
+
+class MCPTaskStatusNotification(BaseModel):
+    method: Literal["notifications/tasks"] = "notifications/tasks"
+    params: dict[str, Any]
+
+
+class MCPSubscriptionsAcknowledgedNotification(BaseModel):
+    method: Literal["notifications/subscriptions/acknowledged"] = "notifications/subscriptions/acknowledged"
+    params: dict[str, Any]
 
 
 class SkillSummary(PayloadModel):
@@ -391,6 +473,14 @@ class SecurityRepository(PayloadModel):
     gitRepository: bool
 
 
+class SecurityPhaseAudit(PayloadModel):
+    phase: str
+    revision: int
+    requestId: str
+    status: str
+    committedAt: str
+
+
 class SecurityScanPayload(PayloadModel):
     scanId: str | None = None
     requestId: str | None = None
@@ -400,10 +490,19 @@ class SecurityScanPayload(PayloadModel):
     phase: str | None = None
     currentPhase: str | None = None
     nextPhase: str | None = None
+    committedPhase: str | None = None
+    committedAt: str | None = None
     updatedAt: str | None = None
     coverageSoFar: dict[str, Any] | None = None
     findingCounts: dict[str, Any] | None = None
     phaseInstructions: str | None = None
+    revision: int = 0
+    stateSource: Literal["bridge_journal"] = "bridge_journal"
+    phaseHistory: list[SecurityPhaseAudit] = Field(default_factory=list)
+    recoveryRequired: bool = False
+    recoveryRequestId: str | None = None
+    recoveryOperation: str | None = None
+    recoveryStatus: str | None = None
 
 
 class SecurityScanResponse(SecurityScanPayload, ResponseFields):
@@ -482,7 +581,7 @@ _ERROR_CODE_ALIASES = {
 _RETRYABLE_ERROR_CODES = {
     "TASK_BUSY", "SANDBOX_UNAVAILABLE", "RUNTIME_UNAVAILABLE", "RUNTIME_LOST",
     "RUNTIME_TIMEOUT", "BASH_UNAVAILABLE", "SECURITY_ADAPTER_UNAVAILABLE",
-    "SECURITY_ADAPTER_FAILED",
+    "SECURITY_ADAPTER_FAILED", "SECURITY_RUNTIME_TIMEOUT",
 }
 _ERROR_WARNINGS = {
     "INVALID_INPUT": "Correct the listed argument fields and retry.",
@@ -496,6 +595,7 @@ _ERROR_WARNINGS = {
     "SANDBOX_UNAVAILABLE": "Run the local doctor/check and retry when the sandbox is ready.",
     "SCAN_STATE_CONFLICT": "Read the authoritative scan state before choosing the next action.",
     "NOT_FOUND": "Refresh the listed resource before retrying.",
+    "SECURITY_RUNTIME_TIMEOUT": "The native result is unknown; retry the same request_id or read security_get_scan.",
 }
 
 
@@ -659,7 +759,400 @@ apps.add_html_resource(
 )
 
 
-mcp = BridgeMCPServer("chatgpt-local-bridge", version="2.2.2", extensions=[apps], instructions=(
+MCP_SECURITY_TASK_PREFIX = "security:"
+_task_event_token = None
+_task_event_token_lock = threading.Lock()
+
+
+def _task_timestamp(value: float | None) -> str:
+    instant = datetime.fromtimestamp(value, timezone.utc) if value is not None else datetime.now(timezone.utc)
+    return instant.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _security_task_id(scan_id: str) -> str:
+    return MCP_SECURITY_TASK_PREFIX + scan_id
+
+
+def _security_scan_id_from_task(task_id: str) -> str:
+    if not task_id.startswith(MCP_SECURITY_TASK_PREFIX):
+        raise BridgeError("NOT_FOUND: unknown task.")
+    scan_id = task_id[len(MCP_SECURITY_TASK_PREFIX):]
+    if not scan_id:
+        raise BridgeError("NOT_FOUND: unknown security task.")
+    return scan_id
+
+
+def _tasks_capable(ctx) -> bool:
+    if ctx.protocol_version not in MODERN_PROTOCOL_VERSIONS:
+        return False
+    capabilities = getattr(ctx.session, "client_capabilities", None)
+    extensions = getattr(capabilities, "extensions", None) or {}
+    return TASKS_EXTENSION_ID in extensions
+
+
+def _require_tasks_capability(ctx) -> None:
+    if not _tasks_capable(ctx):
+        raise MCPError(
+            code=-32021,
+            message="Missing required client capability",
+            data={"requiredCapabilities": {"extensions": {TASKS_EXTENSION_ID: {}}}},
+        )
+
+
+def _raise_task_protocol_error(exc: BridgeError, operation: str) -> None:
+    technical = str(exc)
+    if technical.startswith("NOT_FOUND:"):
+        raise MCPError(
+            code=-32602,
+            message=f"Failed to {operation} task: Task not found",
+            data={"technicalMessage": technical},
+        ) from exc
+    raise MCPError(
+        code=-32603,
+        message=f"Failed to {operation} task",
+        data={"technicalMessage": technical},
+    ) from exc
+
+
+def _mcp_security_task_state(task_id: str) -> dict[str, Any]:
+    scan_id = _security_scan_id_from_task(task_id)
+    snapshot = getattr(bridge(), "security_task_snapshot", None)
+    if callable(snapshot):
+        info, started, updated = snapshot(scan_id)
+    else:
+        info = bridge().security_get_scan(scan_id=scan_id)
+        started = updated = None
+    if not isinstance(info, dict):
+        raise BridgeError("INTERNAL_ERROR: Security task state is not an object.")
+    legacy_status = str(info.get("status") or "running")
+    status = (
+        "cancelled" if legacy_status == "cancelled"
+        else "working" if legacy_status not in {"completed", "failed"}
+        else "completed"
+    )
+    last_updated = updated if isinstance(updated, (int, float)) else started
+    state = {
+        "resultType": "complete",
+        "taskId": task_id,
+        "status": status,
+        "createdAt": _task_timestamp(started if isinstance(started, (int, float)) else None),
+        "lastUpdatedAt": _task_timestamp(last_updated),
+        "ttlMs": None,
+        "pollIntervalMs": 1000,
+    }
+    if status == "working":
+        state["statusMessage"] = info.get("phaseInstructions") or f"Security scan is in phase {info.get('phase', 'running')}."
+        return state
+    if status == "cancelled":
+        state["statusMessage"] = "Security scan cancelled."
+        return state
+    try:
+        payload = SecurityScanResponse.model_validate(info).model_dump(mode="json")
+    except ValidationError as exc:
+        raise BridgeError("INTERNAL_ERROR: Security task state failed schema validation.") from exc
+    state["statusMessage"] = "Security scan completed." if legacy_status == "completed" else "Security scan failed."
+    state["result"] = {
+        "resultType": "complete",
+        "content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False)}],
+        "structuredContent": payload,
+        "isError": legacy_status != "completed",
+    }
+    return state
+
+
+def _mcp_task_state(run_id: str) -> dict[str, Any]:
+    if run_id.startswith(MCP_SECURITY_TASK_PREFIX):
+        return _mcp_security_task_state(run_id)
+    info, started, ended, timeout_seconds = bridge().tasks.task_snapshot(run_id)
+    legacy_status = info["status"]
+    status = "working" if legacy_status == "running" else "cancelled" if legacy_status == "cancelled" else "completed"
+    state = {
+        "resultType": "complete",
+        "taskId": run_id,
+        "status": status,
+        "createdAt": _task_timestamp(started),
+        # A running task has no end time; its start is the stable last-known
+        # update until the durable terminal transition records `ended`.
+        "lastUpdatedAt": _task_timestamp(ended if ended is not None else started),
+        "ttlMs": None,
+        "pollIntervalMs": 500,
+    }
+    if status == "working":
+        state["statusMessage"] = "Task is running."
+        return state
+
+    messages = {
+        "succeeded": "Task completed.",
+        "failed": "Task exited with a non-zero code.",
+        "timed_out": f"Task timed out after {timeout_seconds} seconds; see result.status.",
+        "runtime_lost": "Task runtime was lost; see result.status.",
+        "stopped": "Task stopped through the legacy compatibility tool.",
+        "cancelled": "Task cancelled.",
+    }
+    state["statusMessage"] = messages.get(legacy_status, f"Task ended with status {legacy_status}.")
+    if status == "cancelled":
+        return state
+
+    payload = TaskRunStatusResponse.model_validate(info).model_dump(mode="json")
+    state["result"] = {
+        "resultType": "complete",
+        "content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False)}],
+        "structuredContent": payload,
+        "isError": legacy_status != "succeeded",
+    }
+    return state
+
+
+async def _mcp_tasks_get(ctx, params: MCPTaskGetParams) -> dict[str, Any]:
+    _require_tasks_capability(ctx)
+    try:
+        return await anyio.to_thread.run_sync(_mcp_task_state, params.task_id)
+    except BridgeError as exc:
+        _raise_task_protocol_error(exc, "retrieve")
+        raise AssertionError("unreachable")
+
+
+async def _mcp_tasks_update(ctx, params: MCPTaskUpdateParams) -> dict[str, Any]:
+    _require_tasks_capability(ctx)
+    try:
+        await anyio.to_thread.run_sync(_mcp_task_state, params.task_id)
+    except BridgeError as exc:
+        _raise_task_protocol_error(exc, "update")
+    return {"resultType": "complete"}
+
+
+async def _mcp_tasks_cancel(ctx, params: MCPTaskCancelParams) -> dict[str, Any]:
+    _require_tasks_capability(ctx)
+    try:
+        if params.task_id.startswith(MCP_SECURITY_TASK_PREFIX):
+            scan_id = _security_scan_id_from_task(params.task_id)
+            request_id = "mcp-cancel-" + hashlib.sha256(params.task_id.encode("utf-8")).hexdigest()[:48]
+            await anyio.to_thread.run_sync(
+                partial(bridge().security_cancel_scan, scan_id=scan_id, request_id=request_id)
+            )
+        else:
+            await anyio.to_thread.run_sync(
+                partial(
+                    bridge().tasks.stop_task_run,
+                    params.task_id,
+                    "mcp-cancel-" + params.task_id,
+                    reason="cancelled",
+                )
+            )
+    except BridgeError as exc:
+        _raise_task_protocol_error(exc, "cancel")
+    return {"resultType": "complete"}
+
+
+def _wire_result(value: Any) -> Any:
+    if isinstance(value, BaseModel):
+        return value.model_dump(by_alias=True, mode="json")
+    return value
+
+
+def _security_scan_id_from_value(value: Any) -> str | None:
+    value = _wire_result(value)
+    if not isinstance(value, dict):
+        return None
+    for key in ("scanId", "scan_id"):
+        scan_id = value.get(key)
+        if isinstance(scan_id, str) and scan_id.strip():
+            return scan_id.strip()
+    for key in ("structuredContent", "result", "data", "workspace", "results", "scan"):
+        scan_id = _security_scan_id_from_value(value.get(key))
+        if scan_id:
+            return scan_id
+    return None
+
+
+def _security_scan_id_from_arguments(arguments: Any) -> str | None:
+    if not isinstance(arguments, dict):
+        return None
+    for key in ("scan_id", "scanId"):
+        scan_id = arguments.get(key)
+        if isinstance(scan_id, str) and scan_id.strip():
+            return scan_id.strip()
+    for value in arguments.values():
+        scan_id = _security_scan_id_from_arguments(value)
+        if scan_id:
+            return scan_id
+    return None
+
+
+def _tool_result_is_error(value: Any) -> bool:
+    value = _wire_result(value)
+    return isinstance(value, dict) and bool(value.get("isError", value.get("is_error", False)))
+
+
+async def _publish_task_event(task_id: str) -> None:
+    try:
+        state = await anyio.to_thread.run_sync(_mcp_task_state, task_id)
+        await mcp._subscriptions.publish(MCPTaskStatusEvent(task_id, state))
+    except (BridgeError, ValidationError):
+        return
+
+
+def _queue_task_event(task_id: str) -> None:
+    try:
+        asyncio.get_running_loop().create_task(_publish_task_event(task_id))
+    except RuntimeError:
+        return
+
+
+def _publish_task_event_from_thread(task_id: str) -> None:
+    with _task_event_token_lock:
+        token = _task_event_token
+    if token is None:
+        return
+    try:
+        anyio.from_thread.run_sync(_queue_task_event, task_id, token=token)
+    except Exception:
+        return
+
+
+def _task_runner_event(run_id: str) -> None:
+    _publish_task_event_from_thread(run_id)
+
+
+def _ensure_task_listener() -> None:
+    runner = getattr(bridge(), "tasks", None)
+    if runner is not None and callable(getattr(runner, "add_listener", None)):
+        runner.add_listener(_task_runner_event)
+
+
+class MCPTaskSubscriptionHandler:
+    def __init__(self, bus):
+        self._bus = bus
+
+    async def __call__(self, ctx, params: MCPSubscriptionsListenParams) -> SubscriptionsListenResult:
+        global _task_event_token
+        requested = params.notifications
+        task_ids = []
+        for task_id in requested.task_ids or []:
+            if not isinstance(task_id, str) or not 1 <= len(task_id) <= 256:
+                raise MCPError(code=-32602, message="Invalid task subscription taskId")
+            if task_id not in task_ids:
+                task_ids.append(task_id)
+        if task_ids:
+            _require_tasks_capability(ctx)
+            _ensure_task_listener()
+            with _task_event_token_lock:
+                _task_event_token = anyio.lowlevel.current_token()
+
+        base_raw = requested.model_dump(by_alias=True, exclude_none=True)
+        base_raw.pop("taskIds", None)
+        base_filter = SubscriptionFilter.model_validate(base_raw)
+        honored = base_filter.model_dump(by_alias=True, exclude_none=True)
+        if task_ids:
+            honored["taskIds"] = task_ids
+        meta = {"io.modelcontextprotocol/subscriptionId": ctx.request_id}
+        send, receive = anyio.create_memory_object_stream(128)
+
+        def deliver(event):
+            if isinstance(event, MCPTaskStatusEvent):
+                matches = event.task_id in task_ids
+            else:
+                matches = event_matches(base_filter, frozenset(base_filter.resource_subscriptions or ()), event)
+            if not matches:
+                return
+            try:
+                send.send_nowait(event)
+            except (anyio.ClosedResourceError, anyio.WouldBlock):
+                return
+
+        unsubscribe = self._bus.subscribe(deliver)
+        try:
+            await ctx.session.send_notification(
+                MCPSubscriptionsAcknowledgedNotification(
+                    params={"notifications": honored, "_meta": meta}
+                ),
+                related_request_id=ctx.request_id,
+            )
+            async for event in receive:
+                if isinstance(event, MCPTaskStatusEvent):
+                    payload = dict(event.state)
+                    payload.pop("resultType", None)
+                    payload["taskId"] = event.task_id
+                    payload["_meta"] = meta
+                    notification = MCPTaskStatusNotification(params=payload)
+                else:
+                    notification = event_to_notification(event, meta)
+                await ctx.session.send_notification(notification, related_request_id=ctx.request_id)
+        finally:
+            unsubscribe()
+            send.close()
+            receive.close()
+        return SubscriptionsListenResult(_meta=meta)
+
+
+class MCPTasksExtension(Extension):
+    identifier = TASKS_EXTENSION_ID
+    security_task_tools = frozenset({
+        "security_start_scan",
+        "security_continue_scan",
+        "security_commit_phase",
+        "security_complete_scan",
+        "security_cancel_scan",
+    })
+
+    def methods(self):
+        versions = frozenset(MODERN_PROTOCOL_VERSIONS)
+        return (
+            MethodBinding("tasks/get", MCPTaskGetParams, _mcp_tasks_get, versions),
+            MethodBinding("tasks/update", MCPTaskUpdateParams, _mcp_tasks_update, versions),
+            MethodBinding("tasks/cancel", MCPTaskCancelParams, _mcp_tasks_cancel, versions),
+        )
+
+    async def intercept_tool_call(self, params, ctx, call_next):
+        if not _tasks_capable(ctx):
+            return await call_next(ctx)
+
+        if params.name == "start_task":
+            _ensure_task_listener()
+            tool = mcp._tool_manager.get_tool(params.name)
+            if tool is None:
+                return await call_next(ctx)
+            try:
+                arguments = tool.fn_metadata.validate_arguments(params.arguments or {})
+            except ValidationError:
+                return await call_next(ctx)
+            try:
+                info = await anyio.to_thread.run_sync(partial(
+                    bridge().tasks.start_task,
+                    arguments["task_id"],
+                    arguments["request_id"],
+                    arguments["timeout_seconds"],
+                ))
+            except BridgeError as exc:
+                return _tool_error_result(_error_envelope(exc, arguments.get("request_id"), UI_URI))
+            state = await anyio.to_thread.run_sync(_mcp_task_state, info["run_id"])
+            state["resultType"] = "task"
+            return state
+
+        if params.name == "security_start_scan":
+            result = await call_next(ctx)
+            if _tool_result_is_error(result):
+                return result
+            scan_id = _security_scan_id_from_value(result)
+            if not scan_id:
+                return result
+            task_id = _security_task_id(scan_id)
+            try:
+                state = await anyio.to_thread.run_sync(_mcp_task_state, task_id)
+            except BridgeError:
+                return result
+            state["resultType"] = "task"
+            return state
+
+        result = await call_next(ctx)
+        if params.name in self.security_task_tools:
+            scan_id = _security_scan_id_from_arguments(params.arguments or {}) or _security_scan_id_from_value(result)
+            if scan_id:
+                await _publish_task_event(_security_task_id(scan_id))
+        return result
+
+
+mcp = BridgeMCPServer("chatgpt-local-bridge", version="2.2.2", extensions=[apps, MCPTasksExtension()], instructions=(
     "ChatGPT writes and reasons about code directly; this bridge never starts Codex generation or review. "
     "Read project_info first. Paths are relative to its fixed project. Read files and use their SHA-256 before editing. "
     "Prepare a change to view its diff; if asked only to preview, stop there. Otherwise apply the prepared change "
@@ -671,11 +1164,18 @@ mcp = BridgeMCPServer("chatgpt-local-bridge", version="2.2.2", extensions=[apps]
     "When a user asks in chat to scan or review the local project/folder, call show_security_scan_panel only and wait "
     "for the user to choose the scope and press the start button; never start a Security scan from the chat request. "
     "Security review exposes only standard and chatgpt_deep modes, never starts Codex workers, and uses the "
-    "security facade for authoritative phase state. security_start_scan is app-only and is callable only by the "
-    "Security widget after the user clicks Bắt đầu quét; after that click, resolve the app-created scan with "
-    "security_get_scan(request_id=...) instead of calling security_start_scan from the model. "
-    "This server uses MCP 2026-07-28 through the v2 SDK and remains compatible with legacy MCP clients."
+     "security facade for authoritative phase state. security_start_scan is app-only and is callable only by the "
+     "Security widget after the user clicks Bắt đầu quét; after that click, resolve the app-created scan with "
+     "security_get_scan(request_id=...) instead of calling security_start_scan from the model. "
+     "For Security discovery use security_list_inventory first and search_code_batch for bounded multi-pattern search; "
+     "after any phase timeout, use security_get_scan or security_continue_scan before retrying the same request_id. "
+     "This server uses MCP 2026-07-28 through the v2 SDK and remains compatible with legacy MCP clients."
 ))
+mcp._lowlevel_server.add_request_handler(
+    "subscriptions/listen",
+    MCPSubscriptionsListenParams,
+    MCPTaskSubscriptionHandler(mcp._subscriptions),
+)
 
 
 def tool(description, annotations=READ_ONLY, meta=None):
@@ -762,7 +1262,7 @@ def mcp_diagnostics(ctx: Context) -> Annotated[CallToolResult, ToolOutput[MCPDia
         apps_support=apps_extension_id in extensions,
         apps_extension_id=apps_extension_id,
         apps_extension=extensions.get(apps_extension_id),
-        tasks_support=server_capabilities_data.get("tasks") is not None,
+        tasks_support=TASKS_EXTENSION_ID in extensions,
         local_tasks_support=bool(project_capabilities.get("tasks")),
         subscriptions_support=subscriptions_support,
         structured_output_support=bool(tools) and all(tool.output_schema is not None for tool in tools),
@@ -813,6 +1313,11 @@ def set_runtime_mode(mode: str, confirm: bool = False) -> Annotated[CallToolResu
     return bridge().set_runtime_mode(mode, confirm)
 
 
+@tool("Use this from the control panel to explicitly reconnect a lost local runtime. Never replays an in-flight task.", MUTATING, APP_CALL_META)
+def reconnect_runtime() -> Annotated[CallToolResult, ToolOutput[RuntimeReconnectResponse]]:
+    return bridge().reconnect_runtime()
+
+
 @tool("Run a command through Git Bash. Only available after the user explicitly enables Turbo in the control panel.", TURBO_RUN)
 def run_bash(command: str, timeout_seconds: int = 120) -> Annotated[CallToolResult, ToolOutput[BashResponse]]:
     return bridge().run_bash(command, timeout_seconds)
@@ -823,11 +1328,20 @@ def project_info() -> Annotated[CallToolResult, ToolOutput[ProjectInfoResponse]]
     return bridge().project_info()
 
 
-@tool("Use this to find literal text via installed rg; filter by folder or file extensions and follow next_cursor.")
+@tool("Use this to search literal text locally without App Server access; filter by folder or file extensions and follow next_cursor.")
 def search_code(query: str, prefix: str = "", file_types: list[str] | None = None,
-                case_sensitive: bool = True, max_results: int = 50, cursor: int = 0,
+                case_sensitive: bool = True, max_results: int = 50, cursor: int | str = 0,
                 context_lines: int = 2) -> Annotated[CallToolResult, ToolOutput[SearchResponse]]:
     return bridge().search_code(query, prefix, file_types, case_sensitive, max_results, cursor, context_lines)
+
+
+@tool("Use this for fast repository/security discovery with multiple regular expressions, include/exclude globs and pagination.")
+def search_code_batch(patterns: list[str], prefix: str = "", include_globs: list[str] | None = None,
+                      exclude_globs: list[str] | None = None, case_sensitive: bool = True,
+                      max_results: int = 50, cursor: int | str = 0,
+                      context_lines: int = 2) -> Annotated[CallToolResult, ToolOutput[SearchResponse]]:
+    return bridge().search_code_batch(patterns, prefix, include_globs, exclude_globs,
+                                      case_sensitive, max_results, cursor, context_lines)
 
 
 @tool("Use this to prepare a multi-file diff without writing project files. Each edit needs path, expected_sha256 "
@@ -1004,6 +1518,16 @@ def _security_call(method: str, **kwargs: Any) -> dict[str, Any]:
     if not callable(target):
         raise BridgeError(f"SECURITY_UNAVAILABLE: bridge does not implement {method}.")
     return target(**kwargs)
+
+
+@security_app_tool(
+    "Use this as the first Security inventory pass. It returns only source/config files, skips generated/assets/reports/cache files, "
+    "and supports bounded pagination.",
+)
+def security_list_inventory(prefix: str = "", max_results: int = 100, cursor: int = 0) -> Annotated[
+    CallToolResult, ToolOutput[SecurityInventoryResponse]
+]:
+    return bridge().list_security_files(prefix, max_results, cursor)
 
 
 @security_app_tool(

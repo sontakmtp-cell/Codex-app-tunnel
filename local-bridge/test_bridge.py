@@ -57,6 +57,15 @@ class FakeRuntime:
             return {"thread":{"cwd":str(self.root),"turns":[{"id":"turn1","items":[{"type":"agentMessage","text":"hello"},{"type":"commandExecution","output":"private"}]}]}}
         raise BridgeError("test peer: unsupported method")
 
+    def start(self):
+        self.status="connected"
+        self.error=None
+
+    def verify_policy(self):
+        self.command_ready=True
+        self.command_error=""
+        return {"verified":True,"error":""}
+
     def close(self):
         self.release.set()
         self.status="stopped"
@@ -326,6 +335,16 @@ class BridgeTests(unittest.TestCase):
         with self.assertRaisesRegex(BridgeError, "TURBO_REQUIRED"):
             self.b.run_bash("printf blocked")
 
+    def test_explicit_runtime_reconnect_does_not_replay_tasks(self):
+        self.runtime.status="disconnected"
+        self.runtime.command_ready=False
+        self.runtime.error="RUNTIME_LOST: operations are never automatically replayed."
+        result=self.b.reconnect_runtime()
+        self.assertTrue(result["reconnected"])
+        self.assertEqual(result["project"]["runtime"]["status"],"connected")
+        self.assertTrue(result["project"]["runtime"]["commands_enabled"])
+        self.assertIsNone(self.b.active_run)
+
     def test_project_info_hides_stale_command_error_when_capability_recovers(self):
         self.runtime.command_ready=False
         self.runtime.command_error="Windows refused the protected process."
@@ -356,6 +375,17 @@ class BridgeTests(unittest.TestCase):
         runtime.command([sys.executable],"turbo-run",1,stream=False)
         self.assertEqual(calls[-1]["sandboxPolicy"], {"type":"dangerFullAccess"})
         self.assertNotIn("permissionProfile", calls[-1])
+
+    def test_policy_failure_keeps_upstream_runtime_detail(self):
+        runtime=AppServer(self.root,self.home/"state-policy-error")
+        (runtime.state/"cache").mkdir(parents=True)
+        def rejected(*args,**kwargs):
+            runtime.last_rpc_error="exec failed: windows sandbox helper launch failed; error=The filename or extension is too long. (os error 206)"
+            raise BridgeError("RUNTIME_REJECTED: capability refused.")
+        runtime.call=rejected
+        result=runtime.verify_policy()
+        self.assertFalse(result["verified"])
+        self.assertIn("os error 206",result["error"])
 
     @unittest.skipUnless(os.name=="nt","Windows Job Object check")
     def test_owned_job_stops_descendants_only(self):
@@ -394,12 +424,87 @@ class BridgeTests(unittest.TestCase):
     def test_search_filters_and_continuation(self):
         (self.root/"a file.txt").write_text("Khầy\nKhầy hai\nKhầy ba\n",encoding="utf-8")
         (self.root/".env").write_text("Khầy PRIVATE",encoding="utf-8")
+        (self.root/"src").mkdir()
+        (self.root/"src"/"app.py").write_text("subprocess.run(command, shell=True)\n", encoding="utf-8")
+        (self.root/"reports").mkdir()
+        (self.root/"reports"/"generated.py").write_text("shell=True\n", encoding="utf-8")
         r=self.b.search_code("Khầy",max_results=1)
         self.assertEqual(r["matches"][0]["line"],1)
-        self.assertEqual(r["next_cursor"],1)
-        r=self.b.search_code("khầy",case_sensitive=False,cursor=1,max_results=1,file_types=["txt"])
+        self.assertIsInstance(r["next_cursor"],str)
+        r=self.b.search_code("khầy",case_sensitive=False,cursor=r["next_cursor"],max_results=1,file_types=["txt"])
         self.assertEqual(r["matches"][0]["line"],2)
         self.assertNotIn("PRIVATE",json.dumps(r))
+        batch=self.b.search_code_batch([r"subprocess\.run", r"shell=True"], max_results=10)
+        self.assertEqual(batch["matches"][0]["path"], "src/app.py")
+        self.assertEqual(batch["matches"][0]["patterns"], [r"subprocess\.run", r"shell=True"])
+        inventory=self.b.list_security_files()
+        self.assertEqual(next(item["category"] for item in inventory["files"] if item["path"] == "src/app.py"), "source")
+        self.assertNotIn("reports/generated.py", [item["path"] for item in inventory["files"]])
+
+    def test_search_batch_rejects_pathological_regex(self):
+        started = time.perf_counter()
+        with self.assertRaisesRegex(BridgeError, "unsafe backtracking"):
+            self.b.search_code_batch([r"(a+)+$"])
+        self.assertLess(time.perf_counter() - started, 1.0)
+
+    def test_search_timeout_cursor_resumes_file_traversal(self):
+        import bridge as bridge_module
+
+        contents = {"f0": b"no match\n", "f1": b"still no match\n", "f2": b"needle\n"}
+
+        def read_bytes(raw):
+            return self.root / raw, raw, contents[raw]
+
+        ticks = iter((0, 0, 0, 0, 6))
+        with patch.object(self.b, "_search_candidates", side_effect=lambda *args: iter(contents)), \
+                patch.object(self.b, "_read_bytes", side_effect=read_bytes), \
+                patch.object(bridge_module.time, "monotonic", side_effect=lambda: next(ticks)):
+            first = self.b.search_code_batch(["needle"])
+
+        self.assertTrue(first["scan_truncated"])
+        self.assertIsInstance(first["next_cursor"], str)
+        self.assertEqual(self.b._search_cursor_decode(first["next_cursor"])[0], 1)
+
+        with patch.object(self.b, "_search_candidates", side_effect=lambda *args: iter(contents)), \
+                patch.object(self.b, "_read_bytes", side_effect=read_bytes), \
+                patch.object(bridge_module.time, "monotonic", return_value=0):
+            resumed = self.b.search_code_batch(["needle"], cursor=first["next_cursor"])
+
+        self.assertEqual([match["path"] for match in resumed["matches"]], ["f2"])
+        self.assertEqual(resumed["scanned_files"], 2)
+
+    def test_legacy_cursor_timeout_preserves_skipped_match_count(self):
+        import bridge as bridge_module
+
+        contents = {"f0": b"needle\nneedle\n", "f1": b"needle\n", "f2": b"needle\n"}
+
+        def read_bytes(raw):
+            return self.root / raw, raw, contents[raw]
+
+        with patch.object(self.b, "_search_candidates", side_effect=lambda *args: iter(contents)), \
+                patch.object(self.b, "_read_bytes", side_effect=read_bytes):
+            first = self.b.search_code_batch(["needle"], max_results=2)
+
+        self.assertEqual([(match["path"], match["line"]) for match in first["matches"]],
+                         [("f0", 1), ("f0", 2)])
+        self.assertIsInstance(first["next_cursor"], str)
+
+        ticks = iter((0, 0, 0, 0, 6))
+        with patch.object(self.b, "_search_candidates", side_effect=lambda *args: iter(contents)), \
+                patch.object(self.b, "_read_bytes", side_effect=read_bytes), \
+                patch.object(bridge_module.time, "monotonic", side_effect=lambda: next(ticks)):
+            timed = self.b.search_code_batch(["needle"], cursor=2, max_results=2)
+
+        file_index, line_number, remaining = self.b._search_cursor_decode(timed["next_cursor"])
+        self.assertEqual((file_index, line_number, remaining), (0, 2, 1))
+
+        with patch.object(self.b, "_search_candidates", side_effect=lambda *args: iter(contents)), \
+                patch.object(self.b, "_read_bytes", side_effect=read_bytes), \
+                patch.object(bridge_module.time, "monotonic", return_value=0):
+            resumed = self.b.search_code_batch(["needle"], cursor=timed["next_cursor"], max_results=2)
+
+        self.assertEqual([(match["path"], match["line"]) for match in resumed["matches"]],
+                         [("f1", 1), ("f2", 1)])
 
     def test_git_diff_excludes_sensitive_files_and_preserves_index(self):
         def git(*args):
@@ -451,6 +556,8 @@ class BridgeTests(unittest.TestCase):
         self.assertFalse(self.b.project_info()["git_repository"])
         overrides=process_overrides(self.root,self.home/"cache",[])
         filesystem=next(v for v in overrides if v.startswith("permissions.bridge.filesystem="))
+        self.assertIn("glob_scan_max_depth=4",filesystem)
+        self.assertNotIn("glob_scan_max_depth=32",filesystem)
         self.assertNotIn(json.dumps(str(self.root/".git"))+"=",filesystem)
         external=self.home/"external-read";external.mkdir()
         overrides=process_overrides(self.root,self.home/"cache",[],[external])
@@ -517,10 +624,13 @@ class BridgeTests(unittest.TestCase):
     def test_mcp_schema_and_ui_contract(self):
         import server
         tools=asyncio.run(server.mcp.list_tools())
-        self.assertEqual(len(tools),37)
-        self.assertEqual(server.mcp._lowlevel_server.extensions,{"io.modelcontextprotocol/ui":{}})
+        self.assertEqual(len(tools),40)
+        self.assertEqual(server.mcp._lowlevel_server.extensions,{
+            "io.modelcontextprotocol/ui": {},
+            "io.modelcontextprotocol/tasks": {},
+        })
         linked=[t.name for t in tools if (t.meta or {}).get("ui",{}).get("resourceUri")]
-        self.assertEqual(linked,["show_control_panel","set_runtime_mode","show_security_scan_panel"])
+        self.assertEqual(linked,["show_control_panel","set_runtime_mode","reconnect_runtime","show_security_scan_panel"])
         self.runtime.command_ready=False
         panel=self.b.show_control_panel()
         self.assertTrue(panel["panel_available"])
@@ -531,7 +641,7 @@ class BridgeTests(unittest.TestCase):
         contents=list(asyncio.run(server.mcp.read_resource(server.UI_URI)))
         self.assertEqual(contents[0].mime_type,"text/html;profile=mcp-app")
         html=contents[0].content
-        for required in ("ui/initialize","ui/notifications/initialized","ui/notifications/tool-input","tools/call","ui/notifications/tool-result","2000","Normal (An toàn)","Turbo (Mở quyền)","Áp dụng đợt sửa","Hoàn tác đợt sửa","MCP Diagnostics","Copy diagnostics"):
+        for required in ("ui/initialize","ui/notifications/initialized","ui/notifications/tool-input","tools/call","ui/notifications/tool-result","2000","Normal (An toàn)","Turbo (Mở quyền)","Khôi phục runtime","Áp dụng đợt sửa","Hoàn tác đợt sửa","MCP Diagnostics","Copy diagnostics"):
             self.assertIn(required,html)
         for unsafe in ("eval(","http://localhost","<script src=","/assets/"):
             self.assertNotIn(unsafe,html)
