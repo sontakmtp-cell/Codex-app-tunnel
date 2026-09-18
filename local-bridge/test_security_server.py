@@ -295,6 +295,60 @@ class SecurityServerTests(unittest.TestCase):
         for forbidden in ("token", "authorization", "password", "secret", "credential", ".env"):
             self.assertNotIn(forbidden, serialized)
 
+    def test_task_resource_exposes_cursor_without_replaying_events(self):
+        info = {
+            "run_id": "run-1",
+            "task_id": "git_status",
+            "status": "running",
+            "elapsed_seconds": 1.2,
+            "exit_code": None,
+            "error": None,
+            "events": [{"stream": "stdout", "text": "old log"}] * 200,
+            "next_cursor": 201,
+            "logs_available": True,
+            "truncated": False,
+            "stopping": False,
+            "timed_out": False,
+        }
+        previous_bridge = server._bridge
+        server._bridge = SimpleNamespace(
+            tasks=SimpleNamespace(task_snapshot=lambda _run_id: (info, 1.0, None, 120)),
+        )
+        try:
+            payload = json.loads(server.bridge_task_state_resource("run-1"))
+        finally:
+            server._bridge = previous_bridge
+        self.assertNotIn("events", payload["run"])
+        self.assertEqual(payload["run"]["next_cursor"], 201)
+        self.assertEqual(payload["task"]["eventCursor"], 201)
+
+    def test_event_fingerprint_caches_are_bounded_and_hashed(self):
+        caches = (
+            (server._task_event_fingerprints, server._task_event_fingerprint_lock),
+            (server._resource_event_fingerprints, server._resource_event_fingerprint_lock),
+        )
+        saved = []
+        try:
+            for cache, lock in caches:
+                with lock:
+                    saved.append(dict(cache))
+                    cache.clear()
+            for index in range(server.EVENT_FINGERPRINT_CACHE_LIMIT * 3):
+                for cache, lock in caches:
+                    server._remember_event_fingerprint(cache, lock, f"id-{index}", "x" * 10000 + str(index))
+            for cache, _lock in caches:
+                self.assertLessEqual(len(cache), server.EVENT_FINGERPRINT_CACHE_LIMIT)
+                self.assertTrue(cache)
+                self.assertTrue(all(len(value) == 64 for value in cache.values()))
+            cache, lock = caches[0]
+            self.assertFalse(server._remember_event_fingerprint(cache, lock, "stable", "first"))
+            self.assertTrue(server._remember_event_fingerprint(cache, lock, "stable", "first"))
+        finally:
+            for (cache, lock), old in zip(caches, saved):
+                with lock:
+                    cache.clear()
+                    cache.update(old)
+
     def test_resources_remain_separate(self):
         security = list(asyncio.run(server.mcp.read_resource(server.SECURITY_UI_URI)))[0]
         control = list(asyncio.run(server.mcp.read_resource(server.UI_URI)))[0]

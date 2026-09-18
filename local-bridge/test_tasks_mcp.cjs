@@ -238,7 +238,10 @@ async function waitForTask(mcp, taskId, predicate) {
     assert.ok(resourceNotification);
     assert.equal(resourceNotification.params.uri, `bridge://task/${cancellable.taskId}`);
     const taskResource = await second.rpc('resources/read', { uri: resourceNotification.params.uri });
-    assert.equal(JSON.parse(taskResource.contents[0].text).task.status, 'cancelled');
+    const taskResourcePayload = JSON.parse(taskResource.contents[0].text);
+    assert.equal(taskResourcePayload.task.status, 'cancelled');
+    assert.equal(taskResourcePayload.run.events, undefined);
+    assert.ok(taskResourcePayload.run.next_cursor >= 0);
     await second.close();
     second = null;
 

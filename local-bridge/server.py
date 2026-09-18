@@ -9,6 +9,7 @@ import hashlib
 from importlib.metadata import PackageNotFoundError, version as package_version
 import json
 import logging
+from collections import OrderedDict
 from pathlib import Path
 import sys
 import threading
@@ -763,6 +764,7 @@ apps.add_html_resource(
 
 
 MCP_SECURITY_TASK_PREFIX = "security:"
+EVENT_FINGERPRINT_CACHE_LIMIT = 256
 SECURITY_STATE_TOOLS = frozenset({
     "security_start_scan",
     "security_continue_scan",
@@ -772,9 +774,9 @@ SECURITY_STATE_TOOLS = frozenset({
 })
 _task_event_token = None
 _task_event_token_lock = threading.Lock()
-_task_event_fingerprints = {}
+_task_event_fingerprints = OrderedDict()
 _task_event_fingerprint_lock = threading.Lock()
-_resource_event_fingerprints = {}
+_resource_event_fingerprints = OrderedDict()
 _resource_event_fingerprint_lock = threading.Lock()
 
 
@@ -1016,10 +1018,8 @@ async def _publish_task_event(task_id: str) -> None:
     try:
         state = await anyio.to_thread.run_sync(_mcp_task_state, task_id)
         fingerprint = json.dumps(state, sort_keys=True, ensure_ascii=False, default=str)
-        with _task_event_fingerprint_lock:
-            if _task_event_fingerprints.get(task_id) == fingerprint:
-                return
-            _task_event_fingerprints[task_id] = fingerprint
+        if _remember_event_fingerprint(_task_event_fingerprints, _task_event_fingerprint_lock, task_id, fingerprint):
+            return
         await mcp._subscriptions.publish(MCPTaskStatusEvent(task_id, state))
         await mcp._subscriptions.publish(ResourceUpdated(_task_resource_uri(task_id)))
     except (BridgeError, ValidationError):
@@ -1029,11 +1029,10 @@ async def _publish_task_event(task_id: str) -> None:
 async def _publish_resource_update(uri: str, value: Any = None) -> None:
     try:
         fingerprint = json.dumps(_wire_result(value), sort_keys=True, ensure_ascii=False, default=str) if value is not None else None
-        if fingerprint is not None:
-            with _resource_event_fingerprint_lock:
-                if _resource_event_fingerprints.get(uri) == fingerprint:
-                    return
-                _resource_event_fingerprints[uri] = fingerprint
+        if fingerprint is not None and _remember_event_fingerprint(
+            _resource_event_fingerprints, _resource_event_fingerprint_lock, uri, fingerprint
+        ):
+            return
         await mcp._subscriptions.publish(ResourceUpdated(uri))
     except Exception:
         return
@@ -1056,6 +1055,18 @@ def _find_string(value: Any, keys: tuple[str, ...]) -> str | None:
             if found:
                 return found
     return None
+
+
+def _remember_event_fingerprint(cache, lock, key: str, value: str) -> bool:
+    """Store only a bounded digest; least-recently-used IDs are evicted."""
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+    with lock:
+        previous = cache.get(key)
+        cache[key] = digest
+        cache.move_to_end(key)
+        while len(cache) > EVENT_FINGERPRINT_CACHE_LIMIT:
+            cache.popitem(last=False)
+    return previous == digest
 
 
 async def _publish_tool_state_events(name: str, arguments: Any, result: Any) -> None:
@@ -1286,7 +1297,14 @@ def bridge_task_state_resource(run_id: str) -> str:
         payload = {"task": _mcp_task_state(run_id), "scan": info}
     else:
         info, _, _, _ = bridge().tasks.task_snapshot(run_id)
-        payload = {"task": _mcp_task_state(run_id), "run": info}
+        # Logs are cursor-paginated through get_task_run.  Keep this resource
+        # authoritative but small so a resource update cannot replay cursor 0.
+        run = {key: info.get(key) for key in (
+            "run_id", "task_id", "status", "elapsed_seconds", "exit_code",
+            "error", "next_cursor", "logs_available", "truncated", "stopping",
+            "timed_out",
+        )}
+        payload = {"task": _mcp_task_state(run_id), "run": run}
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
