@@ -168,9 +168,16 @@ async function waitForTask(mcp, taskId, predicate) {
       arguments: { task_id: 'sleep_task', request_id: 'mcp-task-cancel-001', timeout_seconds: 20 },
     });
     assert.equal(cancellable.resultType, 'task');
+    const runningFirst = await second.rpc('tasks/get', { taskId: cancellable.taskId });
+    assert.equal(runningFirst.status, 'working');
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const runningSecond = await second.rpc('tasks/get', { taskId: cancellable.taskId });
+    assert.equal(runningSecond.status, 'working');
+    assert.equal(runningSecond.lastUpdatedAt, runningFirst.lastUpdatedAt);
     const subscription = second.listen([cancellable.taskId]);
     assert.equal((await second.rpc('tasks/cancel', { taskId: cancellable.taskId })).resultType, 'complete');
     const cancelled = await waitForTask(second, cancellable.taskId, (state) => state.status === 'cancelled');
+    assert.notEqual(cancelled.state.lastUpdatedAt, runningFirst.lastUpdatedAt);
     assert.ok(cancelled.seen.includes('working') || cancellable.status === 'working');
     for (let attempt = 0; attempt < 40 && !subscription.messages.some((message) => message.method === 'notifications/tasks'); attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 100));

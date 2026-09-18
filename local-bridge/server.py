@@ -236,7 +236,7 @@ class SearchMatch(PayloadModel):
 
 class SearchResponse(SuccessResponse):
     matches: list[SearchMatch]
-    next_cursor: int | None = None
+    next_cursor: int | str | None = None
     inventory_truncated: bool
     output_truncated: bool
     scanned_files: int = 0
@@ -825,12 +825,13 @@ def _mcp_security_task_state(task_id: str) -> dict[str, Any]:
         else "working" if legacy_status not in {"completed", "failed"}
         else "completed"
     )
+    last_updated = updated if isinstance(updated, (int, float)) else started
     state = {
         "resultType": "complete",
         "taskId": task_id,
         "status": status,
         "createdAt": _task_timestamp(started if isinstance(started, (int, float)) else None),
-        "lastUpdatedAt": _task_timestamp(updated if isinstance(updated, (int, float)) else None),
+        "lastUpdatedAt": _task_timestamp(last_updated),
         "ttlMs": None,
         "pollIntervalMs": 1000,
     }
@@ -865,7 +866,9 @@ def _mcp_task_state(run_id: str) -> dict[str, Any]:
         "taskId": run_id,
         "status": status,
         "createdAt": _task_timestamp(started),
-        "lastUpdatedAt": _task_timestamp(ended),
+        # A running task has no end time; its start is the stable last-known
+        # update until the durable terminal transition records `ended`.
+        "lastUpdatedAt": _task_timestamp(ended if ended is not None else started),
         "ttlMs": None,
         "pollIntervalMs": 500,
     }
@@ -1317,7 +1320,7 @@ def project_info() -> Annotated[CallToolResult, ToolOutput[ProjectInfoResponse]]
 
 @tool("Use this to search literal text locally without App Server access; filter by folder or file extensions and follow next_cursor.")
 def search_code(query: str, prefix: str = "", file_types: list[str] | None = None,
-                case_sensitive: bool = True, max_results: int = 50, cursor: int = 0,
+                case_sensitive: bool = True, max_results: int = 50, cursor: int | str = 0,
                 context_lines: int = 2) -> Annotated[CallToolResult, ToolOutput[SearchResponse]]:
     return bridge().search_code(query, prefix, file_types, case_sensitive, max_results, cursor, context_lines)
 
@@ -1325,7 +1328,7 @@ def search_code(query: str, prefix: str = "", file_types: list[str] | None = Non
 @tool("Use this for fast repository/security discovery with multiple regular expressions, include/exclude globs and pagination.")
 def search_code_batch(patterns: list[str], prefix: str = "", include_globs: list[str] | None = None,
                       exclude_globs: list[str] | None = None, case_sensitive: bool = True,
-                      max_results: int = 50, cursor: int = 0,
+                      max_results: int = 50, cursor: int | str = 0,
                       context_lines: int = 2) -> Annotated[CallToolResult, ToolOutput[SearchResponse]]:
     return bridge().search_code_batch(patterns, prefix, include_globs, exclude_globs,
                                       case_sensitive, max_results, cursor, context_lines)

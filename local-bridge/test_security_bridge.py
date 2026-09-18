@@ -312,6 +312,11 @@ class SecurityBridgeTests(unittest.TestCase):
         adapter = TimeoutFindingsSecurityAdapter(self.root)
         bridge = self.new_bridge("completed-cache-state", adapter)
         try:
+            all_findings = [
+                {"id": f"F{index}", "title": "finding", "severity": "low",
+                 "file": "src/app.py", "line": index + 1}
+                for index in range(205)
+            ]
             started = bridge.security_start_scan("standard", "codebase", request_id="cache-start-001")
             phase_data = {
                 "preflight": {"coverage": {"files": 2}},
@@ -321,10 +326,7 @@ class SecurityBridgeTests(unittest.TestCase):
                 "validation": {"validations": [], "coverage": {"validated": 2}},
                 "attack_path": {"attackPaths": [], "coverage": {"paths": 0}},
                 "finalization": {
-                    "findings": [
-                        {"id": "F1", "title": "unsafe process", "severity": "high", "file": "src/app.py", "line": 10},
-                        {"id": "F2", "title": "weak validation", "severity": "low", "file": "src/app.py", "line": 20},
-                    ],
+                    "findings": all_findings,
                     "coverage": {"complete": True, "files": 2},
                 },
             }
@@ -335,16 +337,20 @@ class SecurityBridgeTests(unittest.TestCase):
 
             completed = bridge.security_complete_scan(started["scanId"], "cache-complete-001")
             self.assertEqual(completed["status"], "completed")
-            self.assertEqual(completed["findingCounts"]["total"], 2)
+            self.assertEqual(completed["findingCounts"]["total"], 205)
             self.assertEqual(completed["coverageSoFar"]["files"], 2)
 
-            first_page = bridge.security_list_findings(started["scanId"], limit=1)
-            self.assertEqual(first_page["total"], 2)
-            self.assertEqual(first_page["findings"][0]["id"], "F1")
-            self.assertEqual(first_page["nextCursor"], 1)
-            second_page = bridge.security_list_findings(started["scanId"], cursor=1, limit=1)
-            self.assertEqual(second_page["findings"][0]["id"], "F2")
-            self.assertIsNone(second_page["nextCursor"])
+            first_page = bridge.security_list_findings(started["scanId"], limit=100)
+            self.assertEqual(first_page["total"], 205)
+            self.assertEqual(first_page["findings"][0]["id"], "F0")
+            self.assertEqual(first_page["nextCursor"], 100)
+            second_page = bridge.security_list_findings(started["scanId"], cursor=100, limit=100)
+            self.assertEqual(second_page["findings"][0]["id"], "F100")
+            self.assertEqual(second_page["nextCursor"], 200)
+            third_page = bridge.security_list_findings(started["scanId"], cursor=200, limit=100)
+            self.assertEqual(len(third_page["findings"]), 5)
+            self.assertEqual(third_page["findings"][-1]["id"], "F204")
+            self.assertIsNone(third_page["nextCursor"])
             self.assertEqual([call for call in adapter.calls if isinstance(call, tuple) and call[0] == "list_findings"], [])
         finally:
             bridge.close()

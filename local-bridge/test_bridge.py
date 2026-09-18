@@ -411,6 +411,38 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(next(item["category"] for item in inventory["files"] if item["path"] == "src/app.py"), "source")
         self.assertNotIn("reports/generated.py", [item["path"] for item in inventory["files"]])
 
+    def test_search_batch_rejects_pathological_regex(self):
+        started = time.perf_counter()
+        with self.assertRaisesRegex(BridgeError, "unsafe backtracking"):
+            self.b.search_code_batch([r"(a+)+$"])
+        self.assertLess(time.perf_counter() - started, 1.0)
+
+    def test_search_timeout_cursor_resumes_file_traversal(self):
+        import bridge as bridge_module
+
+        contents = {"f0": b"no match\n", "f1": b"still no match\n", "f2": b"needle\n"}
+
+        def read_bytes(raw):
+            return self.root / raw, raw, contents[raw]
+
+        ticks = iter((0, 0, 0, 0, 6))
+        with patch.object(self.b, "_search_candidates", side_effect=lambda *args: iter(contents)), \
+                patch.object(self.b, "_read_bytes", side_effect=read_bytes), \
+                patch.object(bridge_module.time, "monotonic", side_effect=lambda: next(ticks)):
+            first = self.b.search_code_batch(["needle"])
+
+        self.assertTrue(first["scan_truncated"])
+        self.assertIsInstance(first["next_cursor"], str)
+        self.assertEqual(self.b._search_cursor_decode(first["next_cursor"])[0], 1)
+
+        with patch.object(self.b, "_search_candidates", side_effect=lambda *args: iter(contents)), \
+                patch.object(self.b, "_read_bytes", side_effect=read_bytes), \
+                patch.object(bridge_module.time, "monotonic", return_value=0):
+            resumed = self.b.search_code_batch(["needle"], cursor=first["next_cursor"])
+
+        self.assertEqual([match["path"] for match in resumed["matches"]], ["f2"])
+        self.assertEqual(resumed["scanned_files"], 2)
+
     def test_git_diff_excludes_sensitive_files_and_preserves_index(self):
         def git(*args):
             return subprocess.run([shutil.which("git"),*args],cwd=self.root,capture_output=True,check=True)

@@ -319,11 +319,76 @@ class LocalBridge(ChangeJournal):
                     continue
                 yield relative
 
+    @staticmethod
+    def _search_cursor_encode(file_index, line_number):
+        payload = json.dumps(
+            {"version": 1, "file": file_index, "line": line_number},
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return "v1:" + base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+    @staticmethod
+    def _search_cursor_decode(cursor):
+        if not isinstance(cursor, str) or len(cursor) > 2000 or not cursor.startswith("v1:"):
+            raise BridgeError("INVALID_INPUT: cursor is not a valid search continuation token.")
+        try:
+            encoded = cursor[3:]
+            encoded += "=" * (-len(encoded) % 4)
+            state = json.loads(base64.urlsafe_b64decode(encoded.encode("ascii")).decode("utf-8"))
+        except (ValueError, UnicodeError, json.JSONDecodeError) as exc:
+            raise BridgeError("INVALID_INPUT: cursor is not a valid search continuation token.") from exc
+        if (not isinstance(state, dict) or state.get("version") != 1 or
+                type(state.get("file")) is not int or state["file"] < 0 or
+                type(state.get("line")) is not int or state["line"] < 1):
+            raise BridgeError("INVALID_INPUT: cursor is not a valid search continuation token.")
+        return state["file"], state["line"]
+
+    @staticmethod
+    def _validate_search_pattern(pattern, regex):
+        if not isinstance(pattern, str) or not 1 <= len(pattern) <= 500 or "\x00" in pattern or "\n" in pattern:
+            raise BridgeError("INVALID_INPUT: each search pattern must be 1-500 characters without NUL/newline.")
+        if not regex:
+            return re.escape(pattern)
+
+        # ponytail: regex-lite whitelist avoids Python re backtracking; add a
+        # bounded regex engine only if richer model-supplied expressions are required.
+        in_class = False
+        escaped = False
+        for character in pattern:
+            if escaped:
+                if character.isdigit():
+                    raise BridgeError("INVALID_INPUT: regex backreferences are not supported.")
+                escaped = False
+                continue
+            if character == "\\":
+                escaped = True
+                continue
+            if in_class:
+                if character == "]":
+                    in_class = False
+                continue
+            if character == "[":
+                in_class = True
+            elif character == "]" or character in "()|*+?{}":
+                raise BridgeError(
+                    "INVALID_INPUT: regex uses an unsafe backtracking construct; "
+                    "use literals, character classes, anchors, or separate patterns."
+                )
+        if escaped or in_class:
+            raise BridgeError("INVALID_INPUT: regex contains an incomplete escape or character class.")
+        return pattern
+
     def _search_code(self, patterns, prefix="", file_types=None, case_sensitive=True,
                      max_results=50, cursor=0, context_lines=2, regex=False,
                      include_globs=None, exclude_globs=None, include_patterns=False):
         integer(max_results, "max_results", 1, 100)
-        integer(cursor, "cursor", 0, 100000)
+        legacy_cursor = None
+        resume_file = resume_line = 0
+        if isinstance(cursor, str):
+            resume_file, resume_line = self._search_cursor_decode(cursor)
+        else:
+            integer(cursor, "cursor", 0, 100000)
+            legacy_cursor = cursor
         integer(context_lines, "context_lines", 0, 5)
         if type(case_sensitive) is not bool:
             raise BridgeError("INVALID_INPUT: case_sensitive must be boolean.")
@@ -332,39 +397,60 @@ class LocalBridge(ChangeJournal):
         flags = 0 if case_sensitive else re.IGNORECASE
         compiled = []
         for pattern in patterns:
-            if not isinstance(pattern, str) or not 1 <= len(pattern) <= 500 or "\x00" in pattern or "\n" in pattern:
-                raise BridgeError("INVALID_INPUT: each search pattern must be 1-500 characters without NUL/newline.")
             try:
-                compiled.append(re.compile(pattern if regex else re.escape(pattern), flags))
+                compiled.append(re.compile(self._validate_search_pattern(pattern, regex), flags))
             except re.error as exc:
                 raise BridgeError("INVALID_INPUT: patterns must be valid regular expressions.") from exc
         if exclude_globs is None:
             exclude_globs = _SEARCH_DEFAULT_EXCLUDES
         deadline = time.monotonic() + _SEARCH_TIME_BUDGET_SECONDS
         results, matched, scanned, more, timed_out = [], 0, 0, False, False
-        for relative in self._search_candidates(prefix, file_types, include_globs, exclude_globs):
+        resume_at_file, resume_at_line = resume_file, resume_line or 1
+        for file_index, relative in enumerate(self._search_candidates(prefix, file_types, include_globs, exclude_globs)):
+            if file_index < resume_file:
+                continue
+            line_start = resume_at_line if file_index == resume_file else 1
             if time.monotonic() >= deadline:
                 timed_out = True
+                resume_at_file, resume_at_line = file_index, line_start
                 break
             scanned += 1
             try:
                 _, path, data = self._read_bytes(relative)
                 text = data.decode("utf-8")
             except (BridgeError, UnicodeDecodeError):
+                resume_at_file, resume_at_line = file_index + 1, 1
                 continue
             if "\x00" in text:
+                resume_at_file, resume_at_line = file_index + 1, 1
                 continue
             lines = text.splitlines()
             for number, actual in enumerate(lines, 1):
+                if number < line_start:
+                    continue
+                if time.monotonic() >= deadline:
+                    timed_out = True
+                    resume_at_file, resume_at_line = file_index, number
+                    break
                 hit_patterns = [pattern for pattern, compiled_pattern in zip(patterns, compiled)
                                 if compiled_pattern.search(actual)]
+                expired = time.monotonic() >= deadline
                 if not hit_patterns:
+                    resume_at_file, resume_at_line = file_index, number + 1
+                    if expired:
+                        timed_out = True
+                        break
                     continue
-                if matched < cursor:
+                if legacy_cursor is not None and matched < legacy_cursor:
                     matched += 1
+                    resume_at_file, resume_at_line = file_index, number + 1
+                    if expired:
+                        timed_out = True
+                        break
                     continue
                 if len(results) >= max_results:
                     more = True
+                    resume_at_file, resume_at_line = file_index, number
                     break
                 item = {"path": path, "line": number, "text": _redact(actual),
                         "context_start_line": max(1, number-context_lines),
@@ -374,9 +460,17 @@ class LocalBridge(ChangeJournal):
                     item["patterns"] = hit_patterns
                 results.append(item)
                 matched += 1
-            if more:
+                resume_at_file, resume_at_line = file_index, number + 1
+                if expired:
+                    timed_out = True
+                    break
+            if more or timed_out:
                 break
-        next_cursor = (cursor + len(results)) if more else (matched if timed_out else None)
+            resume_at_file, resume_at_line = file_index + 1, 1
+        if timed_out or (more and isinstance(cursor, str)):
+            next_cursor = self._search_cursor_encode(resume_at_file, resume_at_line)
+        else:
+            next_cursor = (legacy_cursor + len(results)) if more else None
         return {"matches": results, "next_cursor": next_cursor,
                 "inventory_truncated": False, "output_truncated": False,
                 "scanned_files": scanned, "scan_truncated": timed_out,
@@ -1250,6 +1344,8 @@ class LocalBridge(ChangeJournal):
             cached_findings = None
             if phase == "finalization":
                 final_findings = data.get("findings")
+                # Persist the complete sanitized set; list_findings applies the
+                # caller's page limit when it reads this authoritative cache.
                 cached_findings = self._security_public_findings(final_findings)
                 if not isinstance(finding_counts, dict) or not finding_counts:
                     finding_counts = self._security_finding_counts(final_findings)
@@ -1366,11 +1462,12 @@ class LocalBridge(ChangeJournal):
         # here would turn a safe file name into unusable evidence.
         return normalized[:1000]
 
-    def _security_public_findings(self, findings):
+    def _security_public_findings(self, findings, max_items=None):
         if not isinstance(findings, list):
             return []
         result = []
-        for finding in findings[:200]:
+        source = findings if max_items is None else findings[:max_items]
+        for finding in source:
             if not isinstance(finding, dict):
                 continue
             item = {}
@@ -1490,7 +1587,7 @@ class LocalBridge(ChangeJournal):
             total = page.get("total")
         else:
             raise BridgeError("SECURITY_ADAPTER_INVALID: findings response is not an object.")
-        result = {"scanId": scan_id, "findings": self._security_public_findings(findings),
+        result = {"scanId": scan_id, "findings": self._security_public_findings(findings, limit),
                   "nextCursor": self._security_public_value(next_cursor)}
         if isinstance(total, int) and not isinstance(total, bool):
             result["total"] = total
