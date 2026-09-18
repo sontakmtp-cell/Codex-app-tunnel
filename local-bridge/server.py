@@ -231,6 +231,7 @@ class SearchMatch(PayloadModel):
     context_start_line: int
     context: str
     sha256: str
+    patterns: list[str] = Field(default_factory=list)
 
 
 class SearchResponse(SuccessResponse):
@@ -238,7 +239,24 @@ class SearchResponse(SuccessResponse):
     next_cursor: int | None = None
     inventory_truncated: bool
     output_truncated: bool
+    scanned_files: int = 0
+    scan_truncated: bool = False
     hint: str
+
+
+class SecurityInventoryItem(PayloadModel):
+    path: str
+    category: Literal["source", "config"]
+    size: int
+
+
+class SecurityInventoryResponse(SuccessResponse):
+    workspace_root: str
+    files: list[SecurityInventoryItem]
+    next_cursor: int | None = None
+    truncated: bool
+    summary: dict[str, int]
+    skipped: dict[str, int]
 
 
 class TaskDefinition(PayloadModel):
@@ -450,6 +468,14 @@ class SecurityRepository(PayloadModel):
     gitRepository: bool
 
 
+class SecurityPhaseAudit(PayloadModel):
+    phase: str
+    revision: int
+    requestId: str
+    status: str
+    committedAt: str
+
+
 class SecurityScanPayload(PayloadModel):
     scanId: str | None = None
     requestId: str | None = None
@@ -459,10 +485,19 @@ class SecurityScanPayload(PayloadModel):
     phase: str | None = None
     currentPhase: str | None = None
     nextPhase: str | None = None
+    committedPhase: str | None = None
+    committedAt: str | None = None
     updatedAt: str | None = None
     coverageSoFar: dict[str, Any] | None = None
     findingCounts: dict[str, Any] | None = None
     phaseInstructions: str | None = None
+    revision: int = 0
+    stateSource: Literal["bridge_journal"] = "bridge_journal"
+    phaseHistory: list[SecurityPhaseAudit] = Field(default_factory=list)
+    recoveryRequired: bool = False
+    recoveryRequestId: str | None = None
+    recoveryOperation: str | None = None
+    recoveryStatus: str | None = None
 
 
 class SecurityScanResponse(SecurityScanPayload, ResponseFields):
@@ -541,7 +576,7 @@ _ERROR_CODE_ALIASES = {
 _RETRYABLE_ERROR_CODES = {
     "TASK_BUSY", "SANDBOX_UNAVAILABLE", "RUNTIME_UNAVAILABLE", "RUNTIME_LOST",
     "RUNTIME_TIMEOUT", "BASH_UNAVAILABLE", "SECURITY_ADAPTER_UNAVAILABLE",
-    "SECURITY_ADAPTER_FAILED",
+    "SECURITY_ADAPTER_FAILED", "SECURITY_RUNTIME_TIMEOUT",
 }
 _ERROR_WARNINGS = {
     "INVALID_INPUT": "Correct the listed argument fields and retry.",
@@ -555,6 +590,7 @@ _ERROR_WARNINGS = {
     "SANDBOX_UNAVAILABLE": "Run the local doctor/check and retry when the sandbox is ready.",
     "SCAN_STATE_CONFLICT": "Read the authoritative scan state before choosing the next action.",
     "NOT_FOUND": "Refresh the listed resource before retrying.",
+    "SECURITY_RUNTIME_TIMEOUT": "The native result is unknown; retry the same request_id or read security_get_scan.",
 }
 
 
@@ -1120,10 +1156,12 @@ mcp = BridgeMCPServer("chatgpt-local-bridge", version="2.2.2", extensions=[apps,
     "When a user asks in chat to scan or review the local project/folder, call show_security_scan_panel only and wait "
     "for the user to choose the scope and press the start button; never start a Security scan from the chat request. "
     "Security review exposes only standard and chatgpt_deep modes, never starts Codex workers, and uses the "
-    "security facade for authoritative phase state. security_start_scan is app-only and is callable only by the "
-    "Security widget after the user clicks Bắt đầu quét; after that click, resolve the app-created scan with "
-    "security_get_scan(request_id=...) instead of calling security_start_scan from the model. "
-    "This server uses MCP 2026-07-28 through the v2 SDK and remains compatible with legacy MCP clients."
+     "security facade for authoritative phase state. security_start_scan is app-only and is callable only by the "
+     "Security widget after the user clicks Bắt đầu quét; after that click, resolve the app-created scan with "
+     "security_get_scan(request_id=...) instead of calling security_start_scan from the model. "
+     "For Security discovery use security_list_inventory first and search_code_batch for bounded multi-pattern search; "
+     "after any phase timeout, use security_get_scan or security_continue_scan before retrying the same request_id. "
+     "This server uses MCP 2026-07-28 through the v2 SDK and remains compatible with legacy MCP clients."
 ))
 mcp._lowlevel_server.add_request_handler(
     "subscriptions/listen",
@@ -1277,11 +1315,20 @@ def project_info() -> Annotated[CallToolResult, ToolOutput[ProjectInfoResponse]]
     return bridge().project_info()
 
 
-@tool("Use this to find literal text via installed rg; filter by folder or file extensions and follow next_cursor.")
+@tool("Use this to search literal text locally without App Server access; filter by folder or file extensions and follow next_cursor.")
 def search_code(query: str, prefix: str = "", file_types: list[str] | None = None,
                 case_sensitive: bool = True, max_results: int = 50, cursor: int = 0,
                 context_lines: int = 2) -> Annotated[CallToolResult, ToolOutput[SearchResponse]]:
     return bridge().search_code(query, prefix, file_types, case_sensitive, max_results, cursor, context_lines)
+
+
+@tool("Use this for fast repository/security discovery with multiple regular expressions, include/exclude globs and pagination.")
+def search_code_batch(patterns: list[str], prefix: str = "", include_globs: list[str] | None = None,
+                      exclude_globs: list[str] | None = None, case_sensitive: bool = True,
+                      max_results: int = 50, cursor: int = 0,
+                      context_lines: int = 2) -> Annotated[CallToolResult, ToolOutput[SearchResponse]]:
+    return bridge().search_code_batch(patterns, prefix, include_globs, exclude_globs,
+                                      case_sensitive, max_results, cursor, context_lines)
 
 
 @tool("Use this to prepare a multi-file diff without writing project files. Each edit needs path, expected_sha256 "
@@ -1458,6 +1505,16 @@ def _security_call(method: str, **kwargs: Any) -> dict[str, Any]:
     if not callable(target):
         raise BridgeError(f"SECURITY_UNAVAILABLE: bridge does not implement {method}.")
     return target(**kwargs)
+
+
+@security_app_tool(
+    "Use this as the first Security inventory pass. It returns only source/config files, skips generated/assets/reports/cache files, "
+    "and supports bounded pagination.",
+)
+def security_list_inventory(prefix: str = "", max_results: int = 100, cursor: int = 0) -> Annotated[
+    CallToolResult, ToolOutput[SecurityInventoryResponse]
+]:
+    return bridge().list_security_files(prefix, max_results, cursor)
 
 
 @security_app_tool(

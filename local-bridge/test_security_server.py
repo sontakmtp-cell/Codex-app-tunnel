@@ -25,6 +25,7 @@ SECURITY_TOOLS = {
     "security_cancel_scan",
     "security_list_findings",
     "security_export_findings",
+    "security_list_inventory",
 }
 LEGACY_TOOLS = {
     "show_control_panel",
@@ -38,6 +39,7 @@ LEGACY_TOOLS = {
     "run_bash",
     "project_info",
     "search_code",
+    "search_code_batch",
     "prepare_changes",
     "list_changes",
     "get_change",
@@ -124,6 +126,12 @@ class FakeBridge:
     def security_export_findings(self, **kwargs):
         self._record("security_export_findings", **kwargs)
         return {"scanId": kwargs["scan_id"], "format": kwargs["format"], "content": "[]"}
+
+    def list_security_files(self, *args, **kwargs):
+        self._record("list_security_files", args=args, **kwargs)
+        return {"workspace_root": "C:/project", "files": [], "next_cursor": None,
+                "truncated": False, "summary": {"source": 0, "config": 0, "total": 0},
+                "skipped": {"generated": 0, "binary": 0, "oversize": 0, "non_source": 0}}
 
 
 class FakeTaskBridge(FakeBridge):
@@ -323,6 +331,7 @@ class SecurityServerTests(unittest.TestCase):
                 ("security_cancel_scan", {"scan_id": "scan-1", "request_id": "req-4"}),
                 ("security_list_findings", {"scan_id": "scan-1"}),
                 ("security_export_findings", {"scan_id": "scan-1", "format": "json"}),
+                ("security_list_inventory", {}),
             ]
             return [await server.mcp.call_tool(name, args) for name, args in calls]
 
@@ -411,6 +420,7 @@ class SecurityServerTests(unittest.TestCase):
             "IDEMPOTENCY_CONFLICT: request_id is reused.": ("IDEMPOTENCY_CONFLICT", False),
             "TASK_UNAVAILABLE: executable is missing.": ("TASK_UNAVAILABLE", False),
             "SANDBOX_UNAVAILABLE: disconnected.": ("SANDBOX_UNAVAILABLE", True),
+            "SECURITY_RUNTIME_TIMEOUT: native result is unknown.": ("SECURITY_RUNTIME_TIMEOUT", True),
             "PATH_BLOCKED: protected file.": ("PERMISSION_DENIED", False),
             "SECURITY_PHASE_ORDER: wrong phase.": ("SCAN_STATE_CONFLICT", False),
             "NOT_FOUND: unknown run_id.": ("NOT_FOUND", False),
@@ -590,6 +600,16 @@ class SecurityServerTests(unittest.TestCase):
                 return {"matches": [], "next_cursor": None, "inventory_truncated": False,
                         "output_truncated": False, "hint": "none"}
 
+            def search_code_batch(self, *_args, **_kwargs):
+                return {"matches": [], "next_cursor": None, "inventory_truncated": False,
+                        "output_truncated": False, "scanned_files": 0,
+                        "scan_truncated": False, "hint": "none"}
+
+            def list_security_files(self, *_args, **_kwargs):
+                return {"workspace_root": "C:/project", "files": [], "next_cursor": None,
+                        "truncated": False, "summary": {"source": 0, "config": 0, "total": 0},
+                        "skipped": {"generated": 0, "binary": 0, "oversize": 0, "non_source": 0}}
+
             def prepare_changes(self, *_args, **_kwargs):
                 return change
 
@@ -642,6 +662,8 @@ class SecurityServerTests(unittest.TestCase):
             ("run_bash", {"command": "echo hi", "timeout_seconds": 1}),
             ("project_info", {}),
             ("search_code", {"query": "x"}),
+            ("search_code_batch", {"patterns": ["x"]}),
+            ("security_list_inventory", {}),
             ("prepare_changes", {"title": "x", "edits": [{"path": "a.txt", "content": "new"}], "request_id": "req-1"}),
             ("list_changes", {}),
             ("get_change", {"change_id": "change-1"}),

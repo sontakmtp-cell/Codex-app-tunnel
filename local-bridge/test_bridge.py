@@ -394,12 +394,22 @@ class BridgeTests(unittest.TestCase):
     def test_search_filters_and_continuation(self):
         (self.root/"a file.txt").write_text("Khầy\nKhầy hai\nKhầy ba\n",encoding="utf-8")
         (self.root/".env").write_text("Khầy PRIVATE",encoding="utf-8")
+        (self.root/"src").mkdir()
+        (self.root/"src"/"app.py").write_text("subprocess.run(command, shell=True)\n", encoding="utf-8")
+        (self.root/"reports").mkdir()
+        (self.root/"reports"/"generated.py").write_text("shell=True\n", encoding="utf-8")
         r=self.b.search_code("Khầy",max_results=1)
         self.assertEqual(r["matches"][0]["line"],1)
         self.assertEqual(r["next_cursor"],1)
         r=self.b.search_code("khầy",case_sensitive=False,cursor=1,max_results=1,file_types=["txt"])
         self.assertEqual(r["matches"][0]["line"],2)
         self.assertNotIn("PRIVATE",json.dumps(r))
+        batch=self.b.search_code_batch([r"subprocess\.run", r"shell=True"], max_results=10)
+        self.assertEqual(batch["matches"][0]["path"], "src/app.py")
+        self.assertEqual(batch["matches"][0]["patterns"], [r"subprocess\.run", r"shell=True"])
+        inventory=self.b.list_security_files()
+        self.assertEqual(next(item["category"] for item in inventory["files"] if item["path"] == "src/app.py"), "source")
+        self.assertNotIn("reports/generated.py", [item["path"] for item in inventory["files"]])
 
     def test_git_diff_excludes_sensitive_files_and_preserves_index(self):
         def git(*args):
@@ -517,7 +527,7 @@ class BridgeTests(unittest.TestCase):
     def test_mcp_schema_and_ui_contract(self):
         import server
         tools=asyncio.run(server.mcp.list_tools())
-        self.assertEqual(len(tools),37)
+        self.assertEqual(len(tools),39)
         self.assertEqual(server.mcp._lowlevel_server.extensions,{
             "io.modelcontextprotocol/ui": {},
             "io.modelcontextprotocol/tasks": {},

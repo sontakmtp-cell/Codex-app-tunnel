@@ -28,6 +28,21 @@ BLOCKED_DIRECTORIES = SENSITIVE_DIRECTORIES | {".git", ".venv", "venv", "node_mo
 BLOCKED_SUFFIXES = {".pem", ".key", ".pfx", ".p12", ".crt", ".cer", ".env", ".der", ".jks", ".keystore", ".kdbx", ".p7b"}
 SECRET_PREFIXES = (".env", "credentials", "secrets", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa")
 SECRET_NAMES = {"auth.json", ".npmrc", ".pypirc", ".netrc", "_netrc", ".git-credentials"}
+SECURITY_SKIP_DIRECTORIES = BLOCKED_DIRECTORIES | {
+    "artifacts", "assets", "build", "cache", "coverage", "dist", "generated", "images",
+    "out", "public", "reports", "report", "static", "target", "tmp", "vendor",
+}
+_SECURITY_SKIP_DIRECTORIES_CASEFOLD = {name.casefold() for name in SECURITY_SKIP_DIRECTORIES}
+SECURITY_SOURCE_SUFFIXES = {
+    ".c", ".cc", ".cpp", ".cs", ".css", ".go", ".h", ".hpp", ".html", ".java", ".js",
+    ".jsx", ".kt", ".mjs", ".php", ".py", ".pyi", ".rb", ".rs", ".scala", ".sh", ".sql",
+    ".svelte", ".swift", ".ts", ".tsx", ".vue",
+}
+SECURITY_CONFIG_SUFFIXES = {".cfg", ".conf", ".ini", ".json", ".toml", ".xml", ".yaml", ".yml"}
+SECURITY_CONFIG_NAMES = {
+    "dockerfile", "makefile", "package.json", "pyproject.toml", "requirements.txt",
+    "go.mod", "cargo.toml", "pom.xml", "web.config",
+}
 ALLOWED_EXECUTABLES = {"cargo", "dotnet", "go", "git", "mypy", "node", "npm", "npx", "pnpm",
                        "pytest", "py", "python", "ruff", "uv", "yarn"}
 BLOCKED_COMMAND_WORDS = {"checkout", "clean", "del", "format", "iex", "invoke-expression", "kill",
@@ -317,6 +332,74 @@ class ProjectFiles:
                     if len(files) > max_results:
                         return {"workspace_root": self.root.as_posix(), "files": files[:max_results], "truncated": True}
         return {"workspace_root": self.root.as_posix(), "files": files, "truncated": False}
+
+    def list_security_files(self, prefix="", max_results=200, cursor=0):
+        """Return a bounded source/config inventory for Security workflow phases."""
+        integer(max_results, "max_results", 1, self.config.max_list_results)
+        integer(cursor, "cursor", 0, 100000)
+        base = self._relative(prefix)[0] if prefix else self.root
+        if not base.is_dir():
+            raise BridgeError("INVALID_INPUT: prefix must be a directory.")
+
+        files = []
+        skipped = {"generated": 0, "binary": 0, "oversize": 0, "non_source": 0}
+        summary = {"source": 0, "config": 0}
+        config_names = {name.casefold() for name in SECURITY_CONFIG_NAMES}
+        for folder, dirs, names in os.walk(base, followlinks=False):
+            skipped["generated"] += sum(name.casefold() in _SECURITY_SKIP_DIRECTORIES_CASEFOLD for name in dirs)
+            dirs[:] = sorted(
+                name for name in dirs
+                if name.casefold() not in _SECURITY_SKIP_DIRECTORIES_CASEFOLD
+                and self._safe_relative(Path(folder) / name)
+            )
+            for name in sorted(names):
+                target = Path(folder) / name
+                if not self._safe_relative(target):
+                    continue
+                relative = target.relative_to(self.root).as_posix()
+                parts = {part.casefold() for part in Path(relative).parts[:-1]}
+                if parts & _SECURITY_SKIP_DIRECTORIES_CASEFOLD:
+                    skipped["generated"] += 1
+                    continue
+                try:
+                    size = target.stat().st_size
+                except OSError:
+                    continue
+                if size > self.config.max_file_bytes:
+                    skipped["oversize"] += 1
+                    continue
+                suffix = target.suffix.casefold()
+                lower_name = name.casefold()
+                if lower_name in config_names or suffix in SECURITY_CONFIG_SUFFIXES:
+                    category = "config"
+                    rank = 0
+                elif suffix in SECURITY_SOURCE_SUFFIXES:
+                    category = "source"
+                    rank = 1
+                else:
+                    skipped["non_source"] += 1
+                    continue
+                summary[category] += 1
+                files.append((rank, relative, size, category))
+
+        files.sort(key=lambda item: (item[0], item[1].casefold()))
+        page = files[cursor:cursor + max_results]
+        end = cursor + len(page)
+        return {
+            "workspace_root": self.root.as_posix(),
+            "files": [{"path": path, "category": category, "size": size} for _, path, size, category in page],
+            "next_cursor": end if end < len(files) else None,
+            "truncated": end < len(files),
+            "summary": {**summary, "total": len(files)},
+            "skipped": skipped,
+        }
+
+    def _safe_relative(self, target):
+        try:
+            self._relative(Path(target).relative_to(self.root).as_posix())
+            return True
+        except (BridgeError, OSError, ValueError):
+            return False
 
     def read_file(self, raw, start_line=1, max_bytes=DEFAULT_MAX_FILE_BYTES, end_line=None):
         integer(start_line, "start_line", 1, 2**31)
