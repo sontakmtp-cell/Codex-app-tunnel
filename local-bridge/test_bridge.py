@@ -57,6 +57,15 @@ class FakeRuntime:
             return {"thread":{"cwd":str(self.root),"turns":[{"id":"turn1","items":[{"type":"agentMessage","text":"hello"},{"type":"commandExecution","output":"private"}]}]}}
         raise BridgeError("test peer: unsupported method")
 
+    def start(self):
+        self.status="connected"
+        self.error=None
+
+    def verify_policy(self):
+        self.command_ready=True
+        self.command_error=""
+        return {"verified":True,"error":""}
+
     def close(self):
         self.release.set()
         self.status="stopped"
@@ -326,6 +335,16 @@ class BridgeTests(unittest.TestCase):
         with self.assertRaisesRegex(BridgeError, "TURBO_REQUIRED"):
             self.b.run_bash("printf blocked")
 
+    def test_explicit_runtime_reconnect_does_not_replay_tasks(self):
+        self.runtime.status="disconnected"
+        self.runtime.command_ready=False
+        self.runtime.error="RUNTIME_LOST: operations are never automatically replayed."
+        result=self.b.reconnect_runtime()
+        self.assertTrue(result["reconnected"])
+        self.assertEqual(result["project"]["runtime"]["status"],"connected")
+        self.assertTrue(result["project"]["runtime"]["commands_enabled"])
+        self.assertIsNone(self.b.active_run)
+
     def test_project_info_hides_stale_command_error_when_capability_recovers(self):
         self.runtime.command_ready=False
         self.runtime.command_error="Windows refused the protected process."
@@ -356,6 +375,17 @@ class BridgeTests(unittest.TestCase):
         runtime.command([sys.executable],"turbo-run",1,stream=False)
         self.assertEqual(calls[-1]["sandboxPolicy"], {"type":"dangerFullAccess"})
         self.assertNotIn("permissionProfile", calls[-1])
+
+    def test_policy_failure_keeps_upstream_runtime_detail(self):
+        runtime=AppServer(self.root,self.home/"state-policy-error")
+        (runtime.state/"cache").mkdir(parents=True)
+        def rejected(*args,**kwargs):
+            runtime.last_rpc_error="exec failed: windows sandbox helper launch failed; error=The filename or extension is too long. (os error 206)"
+            raise BridgeError("RUNTIME_REJECTED: capability refused.")
+        runtime.call=rejected
+        result=runtime.verify_policy()
+        self.assertFalse(result["verified"])
+        self.assertIn("os error 206",result["error"])
 
     @unittest.skipUnless(os.name=="nt","Windows Job Object check")
     def test_owned_job_stops_descendants_only(self):
@@ -526,6 +556,8 @@ class BridgeTests(unittest.TestCase):
         self.assertFalse(self.b.project_info()["git_repository"])
         overrides=process_overrides(self.root,self.home/"cache",[])
         filesystem=next(v for v in overrides if v.startswith("permissions.bridge.filesystem="))
+        self.assertIn("glob_scan_max_depth=4",filesystem)
+        self.assertNotIn("glob_scan_max_depth=32",filesystem)
         self.assertNotIn(json.dumps(str(self.root/".git"))+"=",filesystem)
         external=self.home/"external-read";external.mkdir()
         overrides=process_overrides(self.root,self.home/"cache",[],[external])
@@ -592,13 +624,13 @@ class BridgeTests(unittest.TestCase):
     def test_mcp_schema_and_ui_contract(self):
         import server
         tools=asyncio.run(server.mcp.list_tools())
-        self.assertEqual(len(tools),39)
+        self.assertEqual(len(tools),40)
         self.assertEqual(server.mcp._lowlevel_server.extensions,{
             "io.modelcontextprotocol/ui": {},
             "io.modelcontextprotocol/tasks": {},
         })
         linked=[t.name for t in tools if (t.meta or {}).get("ui",{}).get("resourceUri")]
-        self.assertEqual(linked,["show_control_panel","set_runtime_mode","show_security_scan_panel"])
+        self.assertEqual(linked,["show_control_panel","set_runtime_mode","reconnect_runtime","show_security_scan_panel"])
         self.runtime.command_ready=False
         panel=self.b.show_control_panel()
         self.assertTrue(panel["panel_available"])
@@ -609,7 +641,7 @@ class BridgeTests(unittest.TestCase):
         contents=list(asyncio.run(server.mcp.read_resource(server.UI_URI)))
         self.assertEqual(contents[0].mime_type,"text/html;profile=mcp-app")
         html=contents[0].content
-        for required in ("ui/initialize","ui/notifications/initialized","ui/notifications/tool-input","tools/call","ui/notifications/tool-result","2000","Normal (An toàn)","Turbo (Mở quyền)","Áp dụng đợt sửa","Hoàn tác đợt sửa","MCP Diagnostics","Copy diagnostics"):
+        for required in ("ui/initialize","ui/notifications/initialized","ui/notifications/tool-input","tools/call","ui/notifications/tool-result","2000","Normal (An toàn)","Turbo (Mở quyền)","Khôi phục runtime","Áp dụng đợt sửa","Hoàn tác đợt sửa","MCP Diagnostics","Copy diagnostics"):
             self.assertIn(required,html)
         for unsafe in ("eval(","http://localhost","<script src=","/assets/"):
             self.assertNotIn(unsafe,html)

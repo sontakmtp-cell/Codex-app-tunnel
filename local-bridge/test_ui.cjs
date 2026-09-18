@@ -24,7 +24,7 @@ const { chromium } = require(process.env.PLAYWRIGHT_MODULE || path.join(process.
     const modern=(method,params={})=>rpc(method,{...params,_meta:modernMeta});
     const discovered=await modern('server/discover');assert.ok(discovered.supportedVersions.includes('2026-07-28'));assert.ok(discovered.capabilities.extensions['io.modelcontextprotocol/ui']);
     const mcpCall=async(name,args={})=>{const r=await modern('tools/call',{name,arguments:args});assert.ok(!r.isError,JSON.stringify(r.content));return r.structuredContent};
-    const schema=await modern('tools/list');assert.equal(schema.tools.length,39);
+    const schema=await modern('tools/list');assert.equal(schema.tools.length,40);
     const diagnostics=await mcpCall('mcp_diagnostics');
     assert.equal(diagnostics.status,'ok');assert.ok(diagnostics.server_capabilities);assert.equal(diagnostics.apps_support,true);
     assert.equal(diagnostics.subscriptions_support,true);assert.equal(diagnostics.structured_output_support,true);
@@ -60,7 +60,10 @@ const { chromium } = require(process.env.PLAYWRIGHT_MODULE || path.join(process.
     },resource.contents[0].text);
     const frame=page.frameLocator('#app');
     await frame.getByRole('button',{name:'Normal (An toàn)',exact:true}).waitFor();
-    await frame.getByRole('button',{name:'Turbo (Mở quyền)',exact:true}).waitFor();
+    const turbo=frame.getByRole('button',{name:'Turbo (Mở quyền)',exact:true});
+    await turbo.waitFor();
+    assert.equal(await turbo.isEnabled(),false);
+    await frame.getByRole('button',{name:'Khôi phục runtime',exact:true}).waitFor();
     await frame.getByRole('tab',{name:/Workspace & Sơ đồ/}).click();
     await frame.locator('#panel-system').getByText(project.replaceAll('\\','/'),{exact:true}).waitFor();
     await frame.getByRole('tab',{name:/MCP Diagnostics/}).click();

@@ -213,6 +213,32 @@ class LocalBridge(ChangeJournal):
             self.runtime.execution_mode = mode
             return {"mode": mode, "project": self.project_info()}
 
+    def reconnect_runtime(self):
+        """Explicitly recover a lost runtime without replaying an operation."""
+        with self.lock:
+            if self.active_run:
+                raise BridgeError("TASK_BUSY: stop or wait for the active task before reconnecting the runtime.")
+            if self.runtime.status == "connected" and self.runtime.can_execute:
+                return {"reconnected": False, "project": self.project_info()}
+            self.runtime.close()
+            try:
+                self.runtime.start()
+                verification = self.runtime.verify_policy()
+            except BridgeError as exc:
+                self.runtime.error = str(exc)
+                self.runtime.close()
+                raise
+            except Exception as exc:
+                self.runtime.error = "RUNTIME_UNAVAILABLE: runtime reconnect failed."
+                self.runtime.close()
+                raise BridgeError(self.runtime.error) from exc
+            if not verification.get("verified"):
+                error = verification.get("error") or "RUNTIME_UNAVAILABLE: runtime doctor failed."
+                self.runtime.error = error
+                self.runtime.close()
+                raise BridgeError(error)
+            return {"reconnected": True, "project": self.project_info()}
+
     def run_bash(self, command, timeout_seconds=120):
         if not isinstance(command, str) or not 1 <= len(command) <= 20000 or "\x00" in command:
             raise BridgeError("INVALID_INPUT: command must be 1-20000 characters without NUL bytes.")

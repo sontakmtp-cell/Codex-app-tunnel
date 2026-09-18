@@ -557,6 +557,114 @@ Error generating stack: `+a.message+`
         install();
       })();
     </script>
+    <script>
+      (() => {
+        const RECOVERY_ID = "runtime-recovery";
+        const pending = new Map();
+        let sequence = 0;
+        let loading = false;
+        let recovering = false;
+
+        const rpc = (method, params = {}) => new Promise((resolve, reject) => {
+          const id = `runtime-recovery-${Date.now()}-${++sequence}`;
+          const timer = setTimeout(() => {
+            pending.delete(id);
+            reject(new Error(`MCP request timed out: ${method}`));
+          }, 15000);
+          pending.set(id, { resolve, reject, timer });
+          window.parent.postMessage({ jsonrpc: "2.0", id, method, params }, "*");
+        });
+
+        window.addEventListener("message", event => {
+          if (event.source !== window.parent) return;
+          const message = event.data;
+          if (!message?.id || !pending.has(message.id)) return;
+          const request = pending.get(message.id);
+          pending.delete(message.id);
+          clearTimeout(request.timer);
+          if (message.error) request.reject(new Error(message.error.message || "MCP request failed"));
+          else request.resolve(message.result);
+        });
+
+        const call = async (name, args = {}) => {
+          const result = await rpc("tools/call", { name, arguments: args });
+          const structured = result?.structuredContent || result;
+          if (result?.isError || structured?.status === "error") {
+            throw new Error([structured?.error_code, structured?.message].filter(Boolean).join(": ") || "MCP request failed");
+          }
+          return structured;
+        };
+
+        const runtimePanel = () => document.getElementById("panel-runtime");
+        const recoveryCard = () => document.getElementById(RECOVERY_ID);
+        const addText = (parent, className, value) => {
+          const node = document.createElement("div");
+          node.className = className;
+          node.textContent = String(value || "");
+          parent.appendChild(node);
+          return node;
+        };
+
+        const render = info => {
+          const panel = runtimePanel();
+          if (!panel) return;
+          const runtime = info?.runtime;
+          const unavailable = runtime && runtime.status !== "connected";
+          let card = recoveryCard();
+          if (!unavailable) {
+            card?.remove();
+            return;
+          }
+          if (!card) {
+            card = document.createElement("div");
+            card.id = RECOVERY_ID;
+            card.className = "mt-4 rounded-[var(--radius-sm)] border border-[var(--warning-border)] bg-[var(--warning-soft)] p-4";
+            panel.appendChild(card);
+          }
+          card.replaceChildren();
+          addText(card, "font-mono text-xs font-bold text-[var(--warning)]", "Runtime chưa sẵn sàng");
+          addText(card, "mt-1 text-xs leading-relaxed text-[var(--text)]", "App Server đang mất kết nối nên Turbo bị khóa. Khôi phục runtime trước khi đổi chế độ.");
+          if (runtime.error || runtime.command_error) {
+            addText(card, "mt-2 break-all font-mono text-[10px] text-[var(--text-muted)]", runtime.error || runtime.command_error);
+          }
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "mt-3 flex h-8 items-center rounded-[var(--radius-sm)] border border-[var(--warning-border)] bg-[var(--warning)] px-3 font-mono text-xs font-bold text-[#171406] hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-50";
+          button.textContent = recovering ? "Đang khôi phục…" : "Khôi phục runtime";
+          button.disabled = recovering;
+          button.addEventListener("click", async () => {
+            if (recovering) return;
+            recovering = true;
+            render(info);
+            try {
+              await call("reconnect_runtime");
+              document.querySelector('button[title="Làm mới trạng thái MCP"]')?.click();
+              await refresh();
+            } catch (error) {
+              const detail = error?.message || "Không thể khôi phục runtime.";
+              addText(card, "mt-2 break-all font-mono text-[10px] text-[var(--danger)]", detail);
+            } finally {
+              recovering = false;
+              await refresh();
+            }
+          });
+          card.appendChild(button);
+        };
+
+        async function refresh() {
+          if (loading || !runtimePanel()) return;
+          loading = true;
+          try { render(await call("project_info")); } catch (_) { /* React keeps the host error visible. */ }
+          finally { loading = false; }
+        }
+
+        const observer = new MutationObserver(() => {
+          if (runtimePanel() && !recoveryCard()) refresh();
+        });
+        observer.observe(document.documentElement, { childList: true, subtree: true });
+        setInterval(refresh, 2000);
+      })();
+    </script>
   </head>
   <body class="bg-neutral-950 text-neutral-100 antialiased selection:bg-emerald-500/20 selection:text-emerald-300">
     <div id="root"></div>

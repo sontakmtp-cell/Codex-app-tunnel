@@ -216,6 +216,11 @@ class RuntimeModeResponse(SuccessResponse):
     project: ProjectInfo
 
 
+class RuntimeReconnectResponse(SuccessResponse):
+    reconnected: bool
+    project: ProjectInfo
+
+
 class BashResponse(SuccessResponse):
     mode: Literal["turbo"]
     exit_code: int | None = None
@@ -1306,6 +1311,11 @@ def run_task(task_id: str, timeout_seconds: int = 120) -> Annotated[CallToolResu
 @tool("Switch between Normal and Turbo. Turbo requires explicit confirmation and grants Codex full command sandbox access.", MUTATING, APP_CALL_META)
 def set_runtime_mode(mode: str, confirm: bool = False) -> Annotated[CallToolResult, ToolOutput[RuntimeModeResponse]]:
     return bridge().set_runtime_mode(mode, confirm)
+
+
+@tool("Use this from the control panel to explicitly reconnect a lost local runtime. Never replays an in-flight task.", MUTATING, APP_CALL_META)
+def reconnect_runtime() -> Annotated[CallToolResult, ToolOutput[RuntimeReconnectResponse]]:
+    return bridge().reconnect_runtime()
 
 
 @tool("Run a command through Git Bash. Only available after the user explicitly enables Turbo in the control panel.", TURBO_RUN)
