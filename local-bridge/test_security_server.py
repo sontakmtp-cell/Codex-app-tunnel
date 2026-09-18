@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import sys
 import unittest
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -125,6 +126,27 @@ class FakeBridge:
         return {"scanId": kwargs["scan_id"], "format": kwargs["format"], "content": "[]"}
 
 
+class FakeTaskBridge(FakeBridge):
+    def __init__(self):
+        super().__init__()
+        self.task_status = "running"
+
+    def security_task_snapshot(self, scan_id):
+        return {
+            "scanId": scan_id,
+            "status": self.task_status,
+            "phase": "complete" if self.task_status == "completed" else "preflight",
+            "currentPhase": "complete" if self.task_status == "completed" else "preflight",
+            "nextPhase": None if self.task_status == "completed" else "inventory",
+            "updatedAt": "2026-09-18T00:00:02Z",
+        }, 1.0, 2.0
+
+    def security_cancel_scan(self, **kwargs):
+        self._record("security_cancel_scan", **kwargs)
+        self.task_status = "cancelled"
+        return {"scanId": kwargs["scan_id"], "status": "cancelled"}
+
+
 class SecurityServerTests(unittest.TestCase):
     def setUp(self):
         self.previous_bridge = server._bridge
@@ -133,6 +155,60 @@ class SecurityServerTests(unittest.TestCase):
 
     def tearDown(self):
         server._bridge = self.previous_bridge
+
+    def test_security_scan_uses_mcp_task_lifecycle(self):
+        fake = FakeTaskBridge()
+        previous_bridge = server._bridge
+        server._bridge = fake
+        try:
+            ctx = SimpleNamespace(
+                protocol_version="2026-07-28",
+                session=SimpleNamespace(
+                    client_capabilities=SimpleNamespace(
+                        extensions={server.TASKS_EXTENSION_ID: {}}
+                    )
+                ),
+            )
+            params = SimpleNamespace(
+                name="security_start_scan",
+                arguments={
+                    "review_mode": "standard",
+                    "target": "codebase",
+                    "request_id": "security-task-001",
+                },
+            )
+
+            async def call_next(_ctx):
+                return server.CallToolResult(
+                    content=[server.TextContent(type="text", text="started")],
+                    structured_content={"scanId": "scan-1", "status": "running"},
+                )
+
+            created = asyncio.run(server.MCPTasksExtension().intercept_tool_call(params, ctx, call_next))
+            self.assertEqual(created["resultType"], "task")
+            self.assertEqual(created["taskId"], "security:scan-1")
+            running = asyncio.run(
+                server._mcp_tasks_get(ctx, server.MCPTaskGetParams(task_id="security:scan-1"))
+            )
+            self.assertEqual(running["status"], "working")
+
+            fake.task_status = "completed"
+            completed = asyncio.run(
+                server._mcp_tasks_get(ctx, server.MCPTaskGetParams(task_id="security:scan-1"))
+            )
+            self.assertEqual(completed["status"], "completed")
+            self.assertEqual(completed["result"]["structuredContent"]["status"], "completed")
+
+            fake.task_status = "running"
+            self.assertEqual(
+                asyncio.run(
+                    server._mcp_tasks_cancel(ctx, server.MCPTaskCancelParams(task_id="security:scan-1"))
+                ),
+                {"resultType": "complete"},
+            )
+            self.assertEqual(fake.task_status, "cancelled")
+        finally:
+            server._bridge = previous_bridge
 
     def test_tools_list_schema_and_surface(self):
         tools = asyncio.run(server.mcp.list_tools())

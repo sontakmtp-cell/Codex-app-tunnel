@@ -958,6 +958,16 @@ class LocalBridge(ChangeJournal):
                 view["requestId"] = request_id
             return view
 
+    def security_task_snapshot(self, scan_id):
+        scan_id = _security_scan_key(scan_id)
+        with self.lock:
+            row = self._security_scan_record(scan_id) or self._security_start_record_for_scan(scan_id)
+            if not row:
+                raise BridgeError("NOT_FOUND: unknown security scan.")
+            view, _ = self._security_authoritative(scan_id, row)
+            row = self._security_scan_record(scan_id) or row
+            return view, row["created"], row["updated"]
+
     def security_continue_scan(self, scan_id):
         scan_id = _security_scan_key(scan_id)
         with self.lock:

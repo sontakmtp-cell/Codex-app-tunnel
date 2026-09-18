@@ -41,10 +41,18 @@ function client(withTasks) {
   child.stderr.on('data', () => {});
   const input = createInterface({ input: child.stdout });
   const pending = new Map();
+  const subscriptions = new Map();
   let sequence = 0;
   input.on('line', (line) => {
     if (!line.trim()) return;
     const message = JSON.parse(line);
+    if (message.method) {
+      const subscriptionId = message.params?._meta?.['io.modelcontextprotocol/subscriptionId'];
+      if (subscriptionId !== undefined && subscriptions.has(subscriptionId)) {
+        subscriptions.get(subscriptionId).push(message);
+      }
+      return;
+    }
     const waiter = pending.get(message.id);
     if (!waiter) return;
     clearTimeout(waiter.timer);
@@ -74,6 +82,16 @@ function client(withTasks) {
       child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params: { ...params, _meta: meta } }) + '\n');
     });
   }
+  function listen(taskIds) {
+    const id = ++sequence;
+    const messages = [];
+    subscriptions.set(id, messages);
+    child.stdin.write(JSON.stringify({
+      jsonrpc: '2.0', id, method: 'subscriptions/listen',
+      params: { notifications: { taskIds }, _meta: meta },
+    }) + '\n');
+    return { id, messages };
+  }
   async function close() {
     input.close();
     if (child.exitCode !== null) return;
@@ -83,7 +101,7 @@ function client(withTasks) {
       child.once('exit', () => { clearTimeout(timer); resolve(); });
     });
   }
-  return { rpc, close };
+  return { rpc, listen, close };
 }
 
 async function waitForTask(mcp, taskId, predicate) {
@@ -150,9 +168,20 @@ async function waitForTask(mcp, taskId, predicate) {
       arguments: { task_id: 'sleep_task', request_id: 'mcp-task-cancel-001', timeout_seconds: 20 },
     });
     assert.equal(cancellable.resultType, 'task');
+    const subscription = second.listen([cancellable.taskId]);
     assert.equal((await second.rpc('tasks/cancel', { taskId: cancellable.taskId })).resultType, 'complete');
     const cancelled = await waitForTask(second, cancellable.taskId, (state) => state.status === 'cancelled');
     assert.ok(cancelled.seen.includes('working') || cancellable.status === 'working');
+    for (let attempt = 0; attempt < 40 && !subscription.messages.some((message) => message.method === 'notifications/tasks'); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.ok(subscription.messages.some((message) => message.method === 'notifications/subscriptions/acknowledged'));
+    const taskNotification = subscription.messages.find((message) => message.method === 'notifications/tasks');
+    assert.ok(taskNotification);
+    assert.equal(taskNotification.params.taskId, cancellable.taskId);
+    assert.equal(taskNotification.params.status, 'cancelled');
+    assert.equal(taskNotification.params.resultType, undefined);
+    assert.equal(taskNotification.params._meta['io.modelcontextprotocol/subscriptionId'], subscription.id);
     await second.close();
     second = null;
 
@@ -171,6 +200,10 @@ async function waitForTask(mcp, taskId, predicate) {
     legacy = client(false);
     await assert.rejects(
       legacy.rpc('tasks/get', { taskId: created.taskId }),
+      /-32021/,
+    );
+    await assert.rejects(
+      legacy.rpc('subscriptions/listen', { notifications: { taskIds: [created.taskId] } }),
       /-32021/,
     );
     const oldStart = await legacy.rpc('tools/call', {

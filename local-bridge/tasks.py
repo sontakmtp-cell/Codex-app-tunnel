@@ -17,7 +17,19 @@ class TaskRunner:
     def __init__(self, owner, runtime):
         self.owner, self.runtime = owner, runtime
         self.runs = {}
+        self.task_listeners = []
         runtime.listeners.append(self._event)
+
+    def add_listener(self, listener):
+        if listener not in self.task_listeners:
+            self.task_listeners.append(listener)
+
+    def _notify(self, run_id):
+        for listener in tuple(self.task_listeners):
+            try:
+                listener(run_id)
+            except Exception:
+                pass
 
     def list_tasks(self):
         available = self.runtime.can_execute
@@ -68,6 +80,7 @@ class TaskRunner:
                 "done": threading.Event(), "stop_reason": None, "command": argv}
             self.owner.active_run = run_id
             threading.Thread(target=self._work, args=(run_id,argv,timeout_seconds), daemon=True).start()
+            self._notify(run_id)
             return self.get_task_run(run_id)
 
     def _append(self, run, stream, text, final=False):
@@ -139,6 +152,7 @@ class TaskRunner:
                 with self.owner.db:
                     self.owner.db.execute("UPDATE runs SET status=?,ended=?,exit_code=?,error=? WHERE id=?",
                         (status,time.time(),code,error,run_id))
+                self._notify(run_id)
                 if self.owner.active_run == run_id:
                     self.owner.active_run = None
                 run["done"].set()
