@@ -559,7 +559,8 @@
         noticeError: false,
         findingFilter: "all",
         pollTimer: null,
-        pollBusy: false
+        pollBusy: false,
+        subscriptionActive: false
       };
 
       function newId(prefix) {
@@ -897,6 +898,7 @@
         if (!state.requestId && (scan.requestId || scan.request_id)) state.requestId = scan.requestId || scan.request_id;
         renderScan();
         schedulePoll();
+        void syncResourceSubscription();
         return true;
       }
 
@@ -967,8 +969,11 @@
 
       function schedulePoll() {
         if (state.pollTimer) clearTimeout(state.pollTimer);
-        if (!isRunning() || !state.scanId) return;
-        state.pollTimer = setTimeout(() => refreshScan(), 2000);
+        if (!isRunning() || !state.scanId || client.isSubscriptionActive()) return;
+        state.pollTimer = setTimeout(() => {
+          client.metrics.fallbackPolls += 1;
+          refreshScan();
+        }, 2000);
       }
 
       function setHostTheme(theme) {
@@ -1006,8 +1011,17 @@
           this.inFrame = typeof window !== "undefined" && window.parent !== window;
           this.mode = this.inFrame ? "connecting" : "local";
           this.onToolResult = null;
+          this.onResourceUpdate = null;
+          this.onSubscriptionClosed = null;
           this.localScan = null;
           this.localLatest = null;
+          this.metrics = { rpcCalls: 0, subscriptionAttempts: 0, subscriptionEvents: 0, fallbackPolls: 0 };
+          this.subscription = null;
+          this.subscriptionUris = [];
+          this.subscriptionTimer = null;
+          this.subscriptionRetryAt = 0;
+          this.subscriptionEventAt = new Map();
+          window.__securityPanelMetrics = this.metrics;
           this.handleMessage = this.handleMessage.bind(this);
           window.addEventListener("message", this.handleMessage, { passive: true });
         }
@@ -1016,6 +1030,40 @@
           if (this.inFrame && event.source && event.source !== window.parent) return;
           const message = event.data;
           if (!message || message.jsonrpc !== "2.0") return;
+          const meta = message.params && message.params._meta;
+          const subscription = this.subscription;
+          if (subscription && meta && meta["io.modelcontextprotocol/subscriptionId"] === subscription.id) {
+            if (message.method === "notifications/subscriptions/acknowledged") {
+              subscription.active = true;
+              clearTimeout(this.subscriptionTimer);
+              const resolve = subscription.resolve;
+              subscription.resolve = null;
+              resolve && resolve(true);
+              state.subscriptionActive = true;
+              return;
+            }
+            if (message.method === "notifications/resources/updated") {
+              const uri = message.params && message.params.uri;
+              const previous = this.subscriptionEventAt.get(uri) || 0;
+              if (typeof uri === "string" && this.subscriptionUris.includes(uri) && Date.now() - previous >= 100) {
+                this.subscriptionEventAt.set(uri, Date.now());
+                this.metrics.subscriptionEvents += 1;
+                try { this.onResourceUpdate && this.onResourceUpdate(uri); } catch (error) { setNotice(errorText(error), true); }
+              }
+              return;
+            }
+          }
+          if (subscription && message.id === subscription.id) {
+            clearTimeout(this.subscriptionTimer);
+            this.subscription = null;
+            this.subscriptionRetryAt = Date.now() + 3000;
+            state.subscriptionActive = false;
+            const resolve = subscription.resolve;
+            subscription.resolve = null;
+            resolve && resolve(false);
+            try { this.onSubscriptionClosed && this.onSubscriptionClosed(); } catch (error) { setNotice(errorText(error), true); }
+            return;
+          }
           if (message.id !== undefined && this.pending.has(message.id)) {
             const pending = this.pending.get(message.id);
             this.pending.delete(message.id);
@@ -1032,6 +1080,7 @@
 
         request(method, params = {}, timeout = 5000) {
           if (!this.inFrame) return Promise.reject(new Error("MCP Apps host unavailable."));
+          this.metrics.rpcCalls += 1;
           const id = newId("rpc");
           return new Promise((resolve, reject) => {
             const timer = setTimeout(() => {
@@ -1047,6 +1096,65 @@
           if (this.inFrame) window.parent.postMessage({ jsonrpc: "2.0", method, params }, "*");
         }
 
+        isSubscriptionActive() {
+          return Boolean(this.subscription && this.subscription.active);
+        }
+
+        closeResourceSubscription() {
+          const subscription = this.subscription;
+          if (!subscription) return;
+          clearTimeout(this.subscriptionTimer);
+          this.subscription = null;
+          state.subscriptionActive = false;
+          if (subscription.resolve) subscription.resolve(false);
+          if (this.mode === "mcp" && this.inFrame) {
+            this.notify("notifications/cancelled", { requestId: subscription.id });
+          }
+        }
+
+        async listenResources(uris) {
+          const unique = [...new Set((uris || []).filter((uri) => typeof uri === "string" && uri.startsWith("bridge://")))].slice(0, 4);
+          if (!this.inFrame || !this.ready || this.mode !== "mcp" || !unique.length) {
+            this.closeResourceSubscription();
+            this.subscriptionUris = unique;
+            return false;
+          }
+          if (this.subscription && JSON.stringify(unique) === JSON.stringify(this.subscriptionUris)) {
+            return this.subscription.active;
+          }
+          if (Date.now() < this.subscriptionRetryAt) return false;
+          this.closeResourceSubscription();
+          this.subscriptionUris = unique;
+          const id = newId("mcp-subscription");
+          this.metrics.subscriptionAttempts += 1;
+          this.subscription = { id, active: false, resolve: null };
+          return await new Promise((resolve) => {
+            this.subscription.resolve = resolve;
+            this.subscriptionTimer = setTimeout(() => {
+              if (this.subscription && this.subscription.id === id) {
+                this.subscription = null;
+                this.subscriptionRetryAt = Date.now() + 3000;
+                state.subscriptionActive = false;
+              }
+              schedulePoll();
+              resolve(false);
+            }, 1500);
+            window.parent.postMessage({
+              jsonrpc: "2.0",
+              id,
+              method: "subscriptions/listen",
+              params: { notifications: { resourceSubscriptions: unique } }
+            }, "*");
+          });
+        }
+
+        async readResource(uri) {
+          const result = await this.request("resources/read", { uri });
+          const content = (result && result.contents || []).find((item) => item && typeof item.text === "string");
+          if (!content) return result;
+          try { return JSON.parse(content.text); } catch (_) { return result; }
+        }
+
         async initialize() {
           if (!this.inFrame) return;
           try {
@@ -1057,6 +1165,7 @@
             }, 1500);
             this.ready = true;
             this.mode = "mcp";
+            this.subscriptionRetryAt = 0;
             setHostTheme(result && result.hostContext && result.hostContext.theme);
             this.notify("ui/notifications/initialized", {});
           } catch (_) {
@@ -1068,7 +1177,7 @@
         async callTool(name, args = {}) {
           if (this.ready) {
             try { return unpack(await this.request("tools/call", { name, arguments: args })); }
-            catch (_) { this.ready = false; }
+            catch (_) { this.ready = false; this.closeResourceSubscription(); }
           }
           if (window.openai && typeof window.openai.callTool === "function") {
             this.mode = "openai";
@@ -1130,10 +1239,30 @@
         if (!applyFindingsData(payload)) applyPanelData(payload);
       };
 
+      async function syncResourceSubscription() {
+        const uris = state.scanId ? [`bridge://scan/${state.scanId}`] : [];
+        state.subscriptionActive = await client.listenResources(uris);
+        return state.subscriptionActive;
+      }
+
+      client.onResourceUpdate = async (uri) => {
+        if (uri !== `bridge://scan/${state.scanId}`) return;
+        try {
+          await refreshScan(await client.readResource(uri));
+        } catch (_) {
+          await refreshScan();
+        }
+      };
+      client.onSubscriptionClosed = async () => {
+        await refreshScan();
+        await syncResourceSubscription();
+      };
+
       async function refreshPanel() {
         try {
           const result = await client.callTool("show_security_scan_panel", {});
           applyPanelData(result);
+          await syncResourceSubscription();
           $("host-badge").dataset.state = "connected";
           $("host-label").textContent = client.mode === "mcp" ? "MCP Apps bridge" : client.mode === "openai" ? "ChatGPT compatibility" : "Local preview";
         } catch (error) {
@@ -1145,15 +1274,16 @@
         }
       }
 
-      async function refreshScan() {
+      async function refreshScan(resource = null) {
         if (!state.scanId || state.pollBusy) return;
+        const requestedScanId = state.scanId;
         state.pollBusy = true;
         try {
-          const result = await client.callTool("security_get_scan", { scan_id: state.scanId });
+          const result = resource || await client.callTool("security_get_scan", { scan_id: requestedScanId });
           const scan = normalizeScan(result);
-          if (scan && scan.scanId === state.scanId) {
+          if (scan && scan.scanId === requestedScanId && state.scanId === requestedScanId) {
             try {
-              const page = await client.callTool("security_list_findings", { scan_id: state.scanId, max_results: 200 });
+              const page = await client.callTool("security_list_findings", { scan_id: requestedScanId, max_results: 200 });
               const findings = findingsPage(page);
               if (findings) {
                 scan.findings = findings.findings;
@@ -1294,6 +1424,8 @@
 
       function resetScan() {
         if (state.pollTimer) clearTimeout(state.pollTimer);
+        client.closeResourceSubscription();
+        state.pollBusy = false;
         state.requestId = null;
         state.cancelRequestId = null;
         state.scanId = null;

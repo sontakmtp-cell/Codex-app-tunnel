@@ -22,7 +22,7 @@ from mcp.server.extension import Extension, MethodBinding
 from mcp.server.mcpserver.context import Context
 from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from mcp.shared.exceptions import MCPError
-from mcp.shared.subscriptions import event_matches, event_to_notification
+from mcp.shared.subscriptions import ResourceUpdated, event_matches, event_to_notification
 from mcp.types import (
     CallToolResult,
     RequestParams,
@@ -44,6 +44,9 @@ TURBO_RUN = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotent
 DOCS = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True)
 UI_URI = "ui://local-bridge/control-panel-v2.html"
 SECURITY_UI_URI = "ui://local-bridge/security-scan-v1.html"
+TASK_RESOURCE_PREFIX = "bridge://task/"
+SCAN_RESOURCE_PREFIX = "bridge://scan/"
+CHANGE_RESOURCE_PREFIX = "bridge://change/"
 TASKS_EXTENSION_ID = "io.modelcontextprotocol/tasks"
 DATA_META = {"ui":{"visibility":["model","app"]}, "openai/widgetAccessible":True}
 APP_CALL_META = {
@@ -760,8 +763,19 @@ apps.add_html_resource(
 
 
 MCP_SECURITY_TASK_PREFIX = "security:"
+SECURITY_STATE_TOOLS = frozenset({
+    "security_start_scan",
+    "security_continue_scan",
+    "security_commit_phase",
+    "security_complete_scan",
+    "security_cancel_scan",
+})
 _task_event_token = None
 _task_event_token_lock = threading.Lock()
+_task_event_fingerprints = {}
+_task_event_fingerprint_lock = threading.Lock()
+_resource_event_fingerprints = {}
+_resource_event_fingerprint_lock = threading.Lock()
 
 
 def _task_timestamp(value: float | None) -> str:
@@ -771,6 +785,18 @@ def _task_timestamp(value: float | None) -> str:
 
 def _security_task_id(scan_id: str) -> str:
     return MCP_SECURITY_TASK_PREFIX + scan_id
+
+
+def _task_resource_uri(task_id: str) -> str:
+    return TASK_RESOURCE_PREFIX + task_id
+
+
+def _scan_resource_uri(scan_id: str) -> str:
+    return SCAN_RESOURCE_PREFIX + scan_id
+
+
+def _change_resource_uri(change_id: str) -> str:
+    return CHANGE_RESOURCE_PREFIX + change_id
 
 
 def _security_scan_id_from_task(task_id: str) -> str:
@@ -839,6 +865,7 @@ def _mcp_security_task_state(task_id: str) -> dict[str, Any]:
         "lastUpdatedAt": _task_timestamp(last_updated),
         "ttlMs": None,
         "pollIntervalMs": 1000,
+        "eventRevision": int(info.get("revision") or 0),
     }
     if status == "working":
         state["statusMessage"] = info.get("phaseInstructions") or f"Security scan is in phase {info.get('phase', 'running')}."
@@ -876,6 +903,7 @@ def _mcp_task_state(run_id: str) -> dict[str, Any]:
         "lastUpdatedAt": _task_timestamp(ended if ended is not None else started),
         "ttlMs": None,
         "pollIntervalMs": 500,
+        "eventCursor": int(info.get("next_cursor") or 0),
     }
     if status == "working":
         state["statusMessage"] = "Task is running."
@@ -987,9 +1015,65 @@ def _tool_result_is_error(value: Any) -> bool:
 async def _publish_task_event(task_id: str) -> None:
     try:
         state = await anyio.to_thread.run_sync(_mcp_task_state, task_id)
+        fingerprint = json.dumps(state, sort_keys=True, ensure_ascii=False, default=str)
+        with _task_event_fingerprint_lock:
+            if _task_event_fingerprints.get(task_id) == fingerprint:
+                return
+            _task_event_fingerprints[task_id] = fingerprint
         await mcp._subscriptions.publish(MCPTaskStatusEvent(task_id, state))
+        await mcp._subscriptions.publish(ResourceUpdated(_task_resource_uri(task_id)))
     except (BridgeError, ValidationError):
         return
+
+
+async def _publish_resource_update(uri: str, value: Any = None) -> None:
+    try:
+        fingerprint = json.dumps(_wire_result(value), sort_keys=True, ensure_ascii=False, default=str) if value is not None else None
+        if fingerprint is not None:
+            with _resource_event_fingerprint_lock:
+                if _resource_event_fingerprints.get(uri) == fingerprint:
+                    return
+                _resource_event_fingerprints[uri] = fingerprint
+        await mcp._subscriptions.publish(ResourceUpdated(uri))
+    except Exception:
+        return
+
+
+def _find_string(value: Any, keys: tuple[str, ...]) -> str | None:
+    value = _wire_result(value)
+    if isinstance(value, dict):
+        for key in keys:
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+        for key in ("structuredContent", "result", "data", "workspace", "results", "scan", "content"):
+            found = _find_string(value.get(key), keys)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = _find_string(item, keys)
+            if found:
+                return found
+    return None
+
+
+async def _publish_tool_state_events(name: str, arguments: Any, result: Any) -> None:
+    if name in {"start_task", "stop_task_run", "run_task"}:
+        run_id = _find_string(result, ("run_id", "runId")) or _find_string(arguments, ("run_id", "runId"))
+        if run_id:
+            await _publish_task_event(run_id)
+
+    if name in {"prepare_changes", "apply_changes", "undo_changes", "write_file", "apply_patch"}:
+        change_id = _find_string(result, ("change_id", "changeId")) or _find_string(arguments, ("change_id", "changeId"))
+        if change_id:
+            await _publish_resource_update(_change_resource_uri(change_id), result)
+
+    if name in SECURITY_STATE_TOOLS:
+        scan_id = _security_scan_id_from_arguments(arguments) or _security_scan_id_from_value(result)
+        if scan_id:
+            await _publish_resource_update(_scan_resource_uri(scan_id), result)
+            await _publish_task_event(_security_task_id(scan_id))
 
 
 def _queue_task_event(task_id: str) -> None:
@@ -1033,8 +1117,17 @@ class MCPTaskSubscriptionHandler:
                 raise MCPError(code=-32602, message="Invalid task subscription taskId")
             if task_id not in task_ids:
                 task_ids.append(task_id)
+        resource_task_ids = []
+        for uri in requested.resource_subscriptions or []:
+            if not isinstance(uri, str) or not uri.startswith(TASK_RESOURCE_PREFIX):
+                continue
+            task_id = uri[len(TASK_RESOURCE_PREFIX):]
+            if task_id and task_id not in resource_task_ids:
+                resource_task_ids.append(task_id)
+        listener_task_ids = [*task_ids, *[item for item in resource_task_ids if item not in task_ids]]
         if task_ids:
             _require_tasks_capability(ctx)
+        if listener_task_ids:
             _ensure_task_listener()
             with _task_event_token_lock:
                 _task_event_token = anyio.lowlevel.current_token()
@@ -1105,7 +1198,9 @@ class MCPTasksExtension(Extension):
 
     async def intercept_tool_call(self, params, ctx, call_next):
         if not _tasks_capable(ctx):
-            return await call_next(ctx)
+            result = await call_next(ctx)
+            await _publish_tool_state_events(params.name, params.arguments or {}, result)
+            return result
 
         if params.name == "start_task":
             _ensure_task_listener()
@@ -1127,6 +1222,7 @@ class MCPTasksExtension(Extension):
                 return _tool_error_result(_error_envelope(exc, arguments.get("request_id"), UI_URI))
             state = await anyio.to_thread.run_sync(_mcp_task_state, info["run_id"])
             state["resultType"] = "task"
+            await _publish_task_event(info["run_id"])
             return state
 
         if params.name == "security_start_scan":
@@ -1135,20 +1231,20 @@ class MCPTasksExtension(Extension):
                 return result
             scan_id = _security_scan_id_from_value(result)
             if not scan_id:
+                await _publish_tool_state_events(params.name, params.arguments or {}, result)
                 return result
             task_id = _security_task_id(scan_id)
             try:
                 state = await anyio.to_thread.run_sync(_mcp_task_state, task_id)
             except BridgeError:
+                await _publish_tool_state_events(params.name, params.arguments or {}, result)
                 return result
             state["resultType"] = "task"
+            await _publish_tool_state_events(params.name, params.arguments or {}, result)
             return state
 
         result = await call_next(ctx)
-        if params.name in self.security_task_tools:
-            scan_id = _security_scan_id_from_arguments(params.arguments or {}) or _security_scan_id_from_value(result)
-            if scan_id:
-                await _publish_task_event(_security_task_id(scan_id))
+        await _publish_tool_state_events(params.name, params.arguments or {}, result)
         return result
 
 
@@ -1176,6 +1272,50 @@ mcp._lowlevel_server.add_request_handler(
     MCPSubscriptionsListenParams,
     MCPTaskSubscriptionHandler(mcp._subscriptions),
 )
+
+
+@mcp.resource(
+    f"{TASK_RESOURCE_PREFIX}{{run_id}}",
+    name="bridge_task_state",
+    description="Authoritative task state and the current bounded log cursor.",
+    mime_type="application/json",
+)
+def bridge_task_state_resource(run_id: str) -> str:
+    if run_id.startswith(MCP_SECURITY_TASK_PREFIX):
+        info, _, _ = bridge().security_task_snapshot(_security_scan_id_from_task(run_id))
+        payload = {"task": _mcp_task_state(run_id), "scan": info}
+    else:
+        info, _, _, _ = bridge().tasks.task_snapshot(run_id)
+        payload = {"task": _mcp_task_state(run_id), "run": info}
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+@mcp.resource(
+    f"{SCAN_RESOURCE_PREFIX}{{scan_id}}",
+    name="bridge_security_scan_state",
+    description="Authoritative Security Scan state for one scan ID.",
+    mime_type="application/json",
+)
+def bridge_security_scan_state_resource(scan_id: str) -> str:
+    return json.dumps(
+        bridge().security_get_scan(scan_id=scan_id),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+@mcp.resource(
+    f"{CHANGE_RESOURCE_PREFIX}{{change_id}}",
+    name="bridge_change_state",
+    description="Authoritative change/apply state and current diff.",
+    mime_type="application/json",
+)
+def bridge_change_state_resource(change_id: str) -> str:
+    return json.dumps(
+        bridge().get_change(change_id),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
 
 
 def tool(description, annotations=READ_ONLY, meta=None):

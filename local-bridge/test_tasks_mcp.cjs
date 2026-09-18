@@ -92,6 +92,16 @@ function client(withTasks) {
     }) + '\n');
     return { id, messages };
   }
+  function listenResources(resourceUris) {
+    const id = ++sequence;
+    const messages = [];
+    subscriptions.set(id, messages);
+    child.stdin.write(JSON.stringify({
+      jsonrpc: '2.0', id, method: 'subscriptions/listen',
+      params: { notifications: { resourceSubscriptions: resourceUris }, _meta: meta },
+    }) + '\n');
+    return { id, messages };
+  }
   async function close() {
     input.close();
     if (child.exitCode !== null) return;
@@ -101,7 +111,7 @@ function client(withTasks) {
       child.once('exit', () => { clearTimeout(timer); resolve(); });
     });
   }
-  return { rpc, listen, close };
+  return { rpc, listen, listenResources, close };
 }
 
 async function waitForTask(mcp, taskId, predicate) {
@@ -129,6 +139,11 @@ async function waitForTask(mcp, taskId, predicate) {
     assert.ok(startTool);
     assert.ok(startTool.inputSchema.properties.task_id);
     assert.ok(startTool.outputSchema);
+    const templates = await first.rpc('resources/templates/list');
+    const templateUris = (templates.resourceTemplates || templates.resource_templates || []).map((item) => item.uriTemplate || item.uri_template);
+    assert.ok(templateUris.includes('bridge://task/{run_id}'));
+    assert.ok(templateUris.includes('bridge://scan/{scan_id}'));
+    assert.ok(templateUris.includes('bridge://change/{change_id}'));
     const diagnostics = await first.rpc('tools/call', { name: 'mcp_diagnostics', arguments: {} });
     assert.equal(diagnostics.structuredContent.tasks_support, true);
     assert.ok(diagnostics.structuredContent.server_capabilities.extensions[TASKS]);
@@ -155,6 +170,31 @@ async function waitForTask(mcp, taskId, predicate) {
     const completed = await waitForTask(first, created.taskId, (state) => state.status === 'completed');
     assert.equal(completed.state.result.structuredContent.status, 'succeeded');
     assert.ok(completed.seen.includes('working') || created.status === 'completed');
+    const preparedChange = await first.rpc('tools/call', {
+      name: 'prepare_changes',
+      arguments: { title: 'Subscription resource fixture', edits: [{ path: 'resource.txt', content: 'resource\n' }], request_id: 'resource-change-001' },
+    });
+    const preparedData = preparedChange.structuredContent || preparedChange;
+    assert.ok(preparedData.change_id);
+    const changeUri = `bridge://change/${preparedData.change_id}`;
+    const changeSubscription = first.listenResources([changeUri]);
+    const appliedChange = await first.rpc('tools/call', {
+      name: 'apply_changes',
+      arguments: { change_id: preparedData.change_id, request_id: 'resource-change-apply-001' },
+    });
+    assert.equal((appliedChange.structuredContent || appliedChange).status, 'applied');
+    for (let attempt = 0; attempt < 40 && !changeSubscription.messages.some((message) => message.method === 'notifications/resources/updated'); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.ok(changeSubscription.messages.some((message) => message.method === 'notifications/subscriptions/acknowledged'));
+    assert.ok(changeSubscription.messages.some((message) => message.method === 'notifications/resources/updated'));
+    const changeResource = await first.rpc('resources/read', { uri: changeUri });
+    assert.equal(JSON.parse(changeResource.contents[0].text).change_id, preparedData.change_id);
+    assert.equal(JSON.parse(changeResource.contents[0].text).status, 'applied');
+    await first.rpc('tools/call', {
+      name: 'undo_changes',
+      arguments: { change_id: preparedData.change_id, request_id: 'resource-change-undo-001' },
+    });
     await first.close();
     first = null;
 
@@ -175,6 +215,7 @@ async function waitForTask(mcp, taskId, predicate) {
     assert.equal(runningSecond.status, 'working');
     assert.equal(runningSecond.lastUpdatedAt, runningFirst.lastUpdatedAt);
     const subscription = second.listen([cancellable.taskId]);
+    const resourceSubscription = second.listenResources([`bridge://task/${cancellable.taskId}`]);
     assert.equal((await second.rpc('tasks/cancel', { taskId: cancellable.taskId })).resultType, 'complete');
     const cancelled = await waitForTask(second, cancellable.taskId, (state) => state.status === 'cancelled');
     assert.notEqual(cancelled.state.lastUpdatedAt, runningFirst.lastUpdatedAt);
@@ -189,6 +230,15 @@ async function waitForTask(mcp, taskId, predicate) {
     assert.equal(taskNotification.params.status, 'cancelled');
     assert.equal(taskNotification.params.resultType, undefined);
     assert.equal(taskNotification.params._meta['io.modelcontextprotocol/subscriptionId'], subscription.id);
+    for (let attempt = 0; attempt < 40 && !resourceSubscription.messages.some((message) => message.method === 'notifications/resources/updated'); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.ok(resourceSubscription.messages.some((message) => message.method === 'notifications/subscriptions/acknowledged'));
+    const resourceNotification = resourceSubscription.messages.find((message) => message.method === 'notifications/resources/updated');
+    assert.ok(resourceNotification);
+    assert.equal(resourceNotification.params.uri, `bridge://task/${cancellable.taskId}`);
+    const taskResource = await second.rpc('resources/read', { uri: resourceNotification.params.uri });
+    assert.equal(JSON.parse(taskResource.contents[0].text).task.status, 'cancelled');
     await second.close();
     second = null;
 
