@@ -38,6 +38,8 @@ const { chromium } = require(process.env.PLAYWRIGHT_MODULE || path.join(process.
     const malicious='<img src=x onerror="window.PWNED=true">\r\nKhầy\r\n';
     const change=await mcpCall('prepare_changes',{title:'Kiểm thử UI',edits:[{path:'xin chao.txt',content:malicious}],request_id:'ui-test-prepare'});
     assert.ok(!fs.existsSync(path.join(project,'xin chao.txt')));
+    const changeState=await modern('resources/read',{uri:`bridge://change/${change.change_id}`});
+    assert.equal(JSON.parse(changeState.contents[0].text).change_id,change.change_id);
     const resource=await modern('resources/read',{uri:'ui://local-bridge/control-panel-v2.html'});
     assert.equal(resource.contents[0].mimeType,'text/html;profile=mcp-app');
     browser=await chromium.launch({headless:true,executablePath:process.env.BRIDGE_BROWSER || 'C:/Program Files/Google/Chrome/Application/chrome.exe'});
@@ -69,6 +71,7 @@ const { chromium } = require(process.env.PLAYWRIGHT_MODULE || path.join(process.
     await frame.getByRole('tab',{name:/MCP Diagnostics/}).click();
     await frame.getByText('MCP Protocol Diagnostics',{exact:true}).waitFor();
     await frame.getByText('Python MCP SDK version',{exact:true}).waitFor();
+    await frame.getByText('Client update metrics',{exact:true}).waitFor();
     const copyButton=frame.getByRole('button',{name:'Copy diagnostics',exact:true});
     await copyButton.waitFor();await copyButton.click();
     await frame.getByRole('button',{name:/Copied|Copy failed/}).waitFor();

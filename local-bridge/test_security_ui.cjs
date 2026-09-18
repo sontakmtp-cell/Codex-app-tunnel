@@ -19,7 +19,10 @@ function staticContract() {
   mustMatch(/window\.openai[^\n]*callTool|window\.openai[\s\S]*callTool/, 'has callTool compatibility fallback');
   mustMatch(/sendFollowUpMessage/, 'has follow-up compatibility fallback');
   mustMatch(/security_start_scan/, 'starts a Security scan');
-  mustMatch(/security_get_scan/, 'polls authoritative scan state');
+  mustMatch(/security_get_scan/, 'reads authoritative scan state');
+  mustMatch(/subscriptions\/listen/, 'uses MCP resource subscriptions when available');
+  mustMatch(/resources\/read/, 'reads the resource after a subscription update');
+  mustMatch(/fallbackPolls/, 'keeps a legacy polling metric');
   mustMatch(/security_list_findings/, 'loads authoritative finding details');
   mustMatch(/security_cancel_scan/, 'cancels the same scan');
   mustMatch(/show_security_scan_panel/, 'reopens from authoritative panel state');
@@ -80,6 +83,7 @@ async function browserContract() {
   const page = await browser.newPage({ viewport: { width: 900, height: 1100 } });
   const pageErrors = [];
   page.on('pageerror', (error) => pageErrors.push(error.message));
+  await page.exposeFunction('recordSecurityMcpCall', (message) => calls.push(message));
   await page.exposeFunction('securityMcpHost', async (message) => {
     calls.push(message);
     if (message.method === 'ui/initialize') return { hostContext: { theme: 'dark' } };
@@ -87,6 +91,9 @@ async function browserContract() {
       wireEvents.push('message-request');
       if (failMessage) throw new Error('simulated message failure');
       return {};
+    }
+    if (message.method === 'resources/read') {
+      return { contents: [{ uri: message.params?.uri, mimeType: 'application/json', text: JSON.stringify(scan) }] };
     }
     if (message.method !== 'tools/call') return {};
     const { name, arguments: args = {} } = message.params || {};
@@ -97,6 +104,11 @@ async function browserContract() {
       scan = { scanId: `scan-${started.length + 1}`, reviewMode: args.review_mode, target: args.target, status: 'running', phase: 'preflight', nextPhase: 'inventory', progress: 0, findingCounts: { total: 0 }, updatedAt: new Date().toISOString() };
       started.push({ ...args });
       wireEvents.push('start-response');
+      setTimeout(() => {
+        if (!scan || !scan.scanId) return;
+        scan = { ...scan, phase: 'inventory', nextPhase: 'threat_model', progress: 10, updatedAt: new Date().toISOString() };
+        void page.evaluate((uri) => window.__securityNotifyResource(uri), `bridge://scan/${scan.scanId}`).catch(() => {});
+      }, 500);
       return { structuredContent: scan };
     }
     if (name === 'security_list_findings') {
@@ -125,9 +137,27 @@ async function browserContract() {
     await page.setContent('<!doctype html><iframe id="app" title="Security MCP App" style="width:860px;height:1050px;border:0"></iframe>');
     await page.evaluate((source) => {
       const frame = document.getElementById('app');
+      const subscriptions = new Map();
+      window.__securityNotifyResource = (uri) => {
+        for (const [id, subscription] of subscriptions) {
+          if (!subscription.uris.includes(uri)) continue;
+          subscription.source.postMessage({ jsonrpc: '2.0', method: 'notifications/resources/updated', params: { uri, _meta: { 'io.modelcontextprotocol/subscriptionId': id } } }, '*');
+        }
+      };
       addEventListener('message', async (event) => {
         if (event.source !== frame.contentWindow || !event.data || !event.data.method) return;
         const message = event.data;
+        if (message.method === 'subscriptions/listen') {
+          await window.recordSecurityMcpCall(message);
+          if (!window.__subscriptionSupport) {
+            event.source.postMessage({ jsonrpc: '2.0', id: message.id, result: {} }, '*');
+            return;
+          }
+          const uris = message.params?.notifications?.resourceSubscriptions || [];
+          subscriptions.set(message.id, { source: event.source, uris });
+          event.source.postMessage({ jsonrpc: '2.0', method: 'notifications/subscriptions/acknowledged', params: { notifications: { resourceSubscriptions: uris }, _meta: { 'io.modelcontextprotocol/subscriptionId': message.id } } }, '*');
+          return;
+        }
         try {
           const result = await window.securityMcpHost(message);
           event.source.postMessage({ jsonrpc: '2.0', id: message.id, result }, '*');
@@ -137,6 +167,8 @@ async function browserContract() {
         }
       });
       frame.srcdoc = source;
+      window.__setSubscriptionSupport = (value) => { window.__subscriptionSupport = value; };
+      window.__subscriptionSupport = true;
     }, html);
     const frame = page.frameLocator('#app');
     await frame.getByRole('button', { name: 'Bắt đầu quét', exact: true }).waitFor();
@@ -164,9 +196,18 @@ async function browserContract() {
     await frame.getByRole('button', { name: 'Hủy scan', exact: true }).click();
     await frame.locator('#live-status-label').getByText('Đã hủy', { exact: true }).waitFor();
     assert.equal(calls.filter((call) => call.method === 'tools/call' && call.params.name === 'security_cancel_scan').length, 1);
-    assert.equal(calls.at(-1).params.arguments.scan_id, 'scan-1');
+    assert.equal(calls.filter((call) => call.method === 'tools/call' && call.params.name === 'security_cancel_scan').at(-1).params.arguments.scan_id, 'scan-1');
+    await frame.locator('#scan-phase').getByText('Inventory', { exact: true }).waitFor();
+    const widgetFrame = page.frames().find((candidate) => candidate.parentFrame());
+    const subscriptionMetrics = await widgetFrame.evaluate(() => ({ ...window.__securityPanelMetrics }));
+    assert.ok(subscriptionMetrics.subscriptionAttempts >= 1, 'resource subscription attempted');
+    assert.ok(subscriptionMetrics.subscriptionEvents >= 1, 'resource update delivered');
+    assert.equal(subscriptionMetrics.fallbackPolls, 0, 'subscription path avoids fallback polling');
+    assert.ok(calls.some((call) => call.method === 'subscriptions/listen'), 'subscriptions/listen request');
+    assert.ok(calls.some((call) => call.method === 'resources/read'), 'resources/read after update');
 
     failMessage = true;
+    await page.evaluate(() => window.__setSubscriptionSupport(false));
     await frame.getByRole('button', { name: 'Tạo scan mới', exact: true }).click();
     await frame.locator('#review-chatgpt-deep').click();
     await frame.getByRole('button', { name: 'Bắt đầu quét', exact: true }).click();
@@ -177,7 +218,9 @@ async function browserContract() {
     await frame.getByRole('button', { name: 'Gửi lại message', exact: true }).click();
     assert.equal(started.length, 2, 'retrying ui/message keeps one start request');
     assert.equal(await frame.locator('#scan-id').textContent(), scan2, 'scanId remains immutable after message failure');
-    const widgetFrame = page.frames().find((candidate) => candidate.parentFrame());
+    await new Promise((resolve) => setTimeout(resolve, 2300));
+    const legacyMetrics = await widgetFrame.evaluate(() => ({ ...window.__securityPanelMetrics }));
+    assert.ok(legacyMetrics.fallbackPolls >= 1, `legacy host falls back to polling: ${JSON.stringify(legacyMetrics)}`);
     assert.ok(widgetFrame, 'widget frame remains available on reopen');
     await widgetFrame.evaluate(() => window.__securityScanWidget.refresh());
     assert.equal(await frame.locator('#scan-id').textContent(), scan2, 'reopen refresh keeps authoritative scan');

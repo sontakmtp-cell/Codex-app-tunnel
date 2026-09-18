@@ -120,8 +120,12 @@ class TaskRunner:
             except (ValueError, KeyError):
                 run["truncated"] = True
                 return
+            previous_cursor = run["base"] + len(run["events"])
+            previous_truncated = run["truncated"]
             self._append(run, stream, run["decoders"][stream].decode(raw))
             run["truncated"] |= bool(data.get("capReached"))
+            if run["base"] + len(run["events"]) != previous_cursor or run["truncated"] != previous_truncated:
+                self._notify(data["processId"])
 
     def _work(self, run_id, argv, timeout):
         run = self.runs[run_id]

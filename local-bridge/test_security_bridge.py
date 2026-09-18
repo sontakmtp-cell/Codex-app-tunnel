@@ -267,6 +267,20 @@ class SecurityBridgeTests(unittest.TestCase):
             self.bridge.security_commit_phase("scan-0001", "finalization", request_id="late-001",
                                               findings=[], coverage={})
 
+    def test_mcp_scan_resource_reads_authoritative_state(self):
+        import server
+
+        previous = server._bridge
+        server._bridge = self.bridge
+        try:
+            started = self.bridge.security_start_scan("standard", "codebase", request_id="resource-scan-001")
+            payload = json.loads(server.bridge_security_scan_state_resource(started["scanId"]))
+            self.assertEqual(payload["scanId"], started["scanId"])
+            self.assertEqual(payload["status"], "running")
+            self.assertIn("revision", payload)
+        finally:
+            server._bridge = previous
+
     def test_chatgpt_deep_scan_can_complete_with_zero_findings(self):
         adapter = ZeroFindingSecurityAdapter(self.root)
         bridge = self.new_bridge("zero-findings-state", adapter)
