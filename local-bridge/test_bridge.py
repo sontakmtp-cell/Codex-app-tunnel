@@ -518,7 +518,10 @@ class BridgeTests(unittest.TestCase):
         import server
         tools=asyncio.run(server.mcp.list_tools())
         self.assertEqual(len(tools),37)
-        self.assertEqual(server.mcp._lowlevel_server.extensions,{"io.modelcontextprotocol/ui":{}})
+        self.assertEqual(server.mcp._lowlevel_server.extensions,{
+            "io.modelcontextprotocol/ui": {},
+            "io.modelcontextprotocol/tasks": {},
+        })
         linked=[t.name for t in tools if (t.meta or {}).get("ui",{}).get("resourceUri")]
         self.assertEqual(linked,["show_control_panel","set_runtime_mode","show_security_scan_panel"])
         self.runtime.command_ready=False

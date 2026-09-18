@@ -192,6 +192,14 @@ class TaskRunner:
                 "stopping": bool(run and run["stop_reason"] and not run["done"].is_set()),
                 "timed_out": row["status"] == "timed_out"}
 
+    def task_snapshot(self, run_id):
+        """Return a durable task view plus timestamps for the MCP Tasks adapter."""
+        with self.owner.lock:
+            row = self.owner.db.execute("SELECT started,ended,timeout FROM runs WHERE id=?", (run_id,)).fetchone()
+            if not row:
+                raise BridgeError("NOT_FOUND: unknown run_id.")
+            return self.get_task_run(run_id, max_events=200), row["started"], row["ended"], row["timeout"]
+
     def run_task(self, task_id, timeout_seconds=120):
         info = self.start_task(task_id, uuid.uuid4().hex, timeout_seconds)
         run = self.runs[info["run_id"]]

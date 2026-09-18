@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 from functools import partial, wraps
 from importlib.metadata import PackageNotFoundError, version as package_version
 import json
@@ -13,9 +14,11 @@ import anyio
 from mcp.server.lowlevel.server import MODERN_PROTOCOL_VERSIONS
 from mcp.server import MCPServer
 from mcp.server.apps import Apps, ResourceCsp
+from mcp.server.extension import Extension, MethodBinding
 from mcp.server.mcpserver.context import Context
 from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
-from mcp.types import CallToolResult, TextContent, ToolAnnotations
+from mcp.shared.exceptions import MCPError
+from mcp.types import CallToolResult, RequestParams, TextContent, ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field, RootModel, ValidationError
 
 from bridge import LocalBridge
@@ -29,6 +32,7 @@ TURBO_RUN = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotent
 DOCS = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True)
 UI_URI = "ui://local-bridge/control-panel-v2.html"
 SECURITY_UI_URI = "ui://local-bridge/security-scan-v1.html"
+TASKS_EXTENSION_ID = "io.modelcontextprotocol/tasks"
 DATA_META = {"ui":{"visibility":["model","app"]}, "openai/widgetAccessible":True}
 APP_CALL_META = {
     "ui": {"resourceUri": UI_URI, "visibility": ["model", "app"]},
@@ -268,6 +272,19 @@ class RunTaskResponse(TaskRunStatusResponse):
     stdout: str
     stderr: str
     command: list[str]
+
+
+class MCPTaskGetParams(RequestParams):
+    task_id: str = Field(min_length=1, max_length=128)
+
+
+class MCPTaskUpdateParams(RequestParams):
+    task_id: str = Field(min_length=1, max_length=128)
+    input_responses: dict[str, Any]
+
+
+class MCPTaskCancelParams(RequestParams):
+    task_id: str = Field(min_length=1, max_length=128)
 
 
 class SkillSummary(PayloadModel):
@@ -659,7 +676,150 @@ apps.add_html_resource(
 )
 
 
-mcp = BridgeMCPServer("chatgpt-local-bridge", version="2.2.2", extensions=[apps], instructions=(
+def _task_timestamp(value: float | None) -> str:
+    instant = datetime.fromtimestamp(value, timezone.utc) if value is not None else datetime.now(timezone.utc)
+    return instant.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _tasks_capable(ctx) -> bool:
+    if ctx.protocol_version not in MODERN_PROTOCOL_VERSIONS:
+        return False
+    capabilities = getattr(ctx.session, "client_capabilities", None)
+    extensions = getattr(capabilities, "extensions", None) or {}
+    return TASKS_EXTENSION_ID in extensions
+
+
+def _require_tasks_capability(ctx) -> None:
+    if not _tasks_capable(ctx):
+        raise MCPError(
+            code=-32021,
+            message="Missing required client capability",
+            data={"requiredCapabilities": {"extensions": {TASKS_EXTENSION_ID: {}}}},
+        )
+
+
+def _raise_task_protocol_error(exc: BridgeError, operation: str) -> None:
+    technical = str(exc)
+    if technical.startswith("NOT_FOUND:"):
+        raise MCPError(
+            code=-32602,
+            message=f"Failed to {operation} task: Task not found",
+            data={"technicalMessage": technical},
+        ) from exc
+    raise MCPError(
+        code=-32603,
+        message=f"Failed to {operation} task",
+        data={"technicalMessage": technical},
+    ) from exc
+
+
+def _mcp_task_state(run_id: str) -> dict[str, Any]:
+    info, started, ended, timeout_seconds = bridge().tasks.task_snapshot(run_id)
+    legacy_status = info["status"]
+    status = "working" if legacy_status == "running" else "cancelled" if legacy_status == "cancelled" else "completed"
+    state = {
+        "resultType": "complete",
+        "taskId": run_id,
+        "status": status,
+        "createdAt": _task_timestamp(started),
+        "lastUpdatedAt": _task_timestamp(ended),
+        "ttlMs": None,
+        "pollIntervalMs": 500,
+    }
+    if status == "working":
+        state["statusMessage"] = "Task is running."
+        return state
+
+    messages = {
+        "succeeded": "Task completed.",
+        "failed": "Task exited with a non-zero code.",
+        "timed_out": f"Task timed out after {timeout_seconds} seconds; see result.status.",
+        "runtime_lost": "Task runtime was lost; see result.status.",
+        "stopped": "Task stopped through the legacy compatibility tool.",
+        "cancelled": "Task cancelled.",
+    }
+    state["statusMessage"] = messages.get(legacy_status, f"Task ended with status {legacy_status}.")
+    if status == "cancelled":
+        return state
+
+    payload = TaskRunStatusResponse.model_validate(info).model_dump(mode="json")
+    state["result"] = {
+        "resultType": "complete",
+        "content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False)}],
+        "structuredContent": payload,
+        "isError": legacy_status != "succeeded",
+    }
+    return state
+
+
+async def _mcp_tasks_get(ctx, params: MCPTaskGetParams) -> dict[str, Any]:
+    _require_tasks_capability(ctx)
+    try:
+        return _mcp_task_state(params.task_id)
+    except BridgeError as exc:
+        _raise_task_protocol_error(exc, "retrieve")
+        raise AssertionError("unreachable")
+
+
+async def _mcp_tasks_update(ctx, params: MCPTaskUpdateParams) -> dict[str, Any]:
+    _require_tasks_capability(ctx)
+    try:
+        bridge().tasks.task_snapshot(params.task_id)
+    except BridgeError as exc:
+        _raise_task_protocol_error(exc, "update")
+    return {"resultType": "complete"}
+
+
+async def _mcp_tasks_cancel(ctx, params: MCPTaskCancelParams) -> dict[str, Any]:
+    _require_tasks_capability(ctx)
+    try:
+        bridge().tasks.stop_task_run(
+            params.task_id,
+            "mcp-cancel-" + params.task_id,
+            reason="cancelled",
+        )
+    except BridgeError as exc:
+        _raise_task_protocol_error(exc, "cancel")
+    return {"resultType": "complete"}
+
+
+class MCPTasksExtension(Extension):
+    identifier = TASKS_EXTENSION_ID
+
+    def methods(self):
+        versions = frozenset(MODERN_PROTOCOL_VERSIONS)
+        return (
+            MethodBinding("tasks/get", MCPTaskGetParams, _mcp_tasks_get, versions),
+            MethodBinding("tasks/update", MCPTaskUpdateParams, _mcp_tasks_update, versions),
+            MethodBinding("tasks/cancel", MCPTaskCancelParams, _mcp_tasks_cancel, versions),
+        )
+
+    async def intercept_tool_call(self, params, ctx, call_next):
+        if params.name != "start_task" or not _tasks_capable(ctx):
+            return await call_next(ctx)
+
+        tool = mcp._tool_manager.get_tool(params.name)
+        if tool is None:
+            return await call_next(ctx)
+        try:
+            arguments = tool.fn_metadata.validate_arguments(params.arguments or {})
+        except ValidationError:
+            return await call_next(ctx)
+        try:
+            info = await anyio.to_thread.run_sync(partial(
+                bridge().tasks.start_task,
+                arguments["task_id"],
+                arguments["request_id"],
+                arguments["timeout_seconds"],
+            ))
+        except BridgeError as exc:
+            return _tool_error_result(_error_envelope(exc, arguments.get("request_id"), UI_URI))
+        state = _mcp_task_state(info["run_id"])
+        state["resultType"] = "task"
+        return state
+
+
+mcp = BridgeMCPServer("chatgpt-local-bridge", version="2.2.2", extensions=[apps, MCPTasksExtension()], instructions=(
     "ChatGPT writes and reasons about code directly; this bridge never starts Codex generation or review. "
     "Read project_info first. Paths are relative to its fixed project. Read files and use their SHA-256 before editing. "
     "Prepare a change to view its diff; if asked only to preview, stop there. Otherwise apply the prepared change "
@@ -762,7 +922,7 @@ def mcp_diagnostics(ctx: Context) -> Annotated[CallToolResult, ToolOutput[MCPDia
         apps_support=apps_extension_id in extensions,
         apps_extension_id=apps_extension_id,
         apps_extension=extensions.get(apps_extension_id),
-        tasks_support=server_capabilities_data.get("tasks") is not None,
+        tasks_support=TASKS_EXTENSION_ID in extensions,
         local_tasks_support=bool(project_capabilities.get("tasks")),
         subscriptions_support=subscriptions_support,
         structured_output_support=bool(tools) and all(tool.output_schema is not None for tool in tools),
