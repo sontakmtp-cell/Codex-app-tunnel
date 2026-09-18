@@ -400,8 +400,8 @@ class BridgeTests(unittest.TestCase):
         (self.root/"reports"/"generated.py").write_text("shell=True\n", encoding="utf-8")
         r=self.b.search_code("Khầy",max_results=1)
         self.assertEqual(r["matches"][0]["line"],1)
-        self.assertEqual(r["next_cursor"],1)
-        r=self.b.search_code("khầy",case_sensitive=False,cursor=1,max_results=1,file_types=["txt"])
+        self.assertIsInstance(r["next_cursor"],str)
+        r=self.b.search_code("khầy",case_sensitive=False,cursor=r["next_cursor"],max_results=1,file_types=["txt"])
         self.assertEqual(r["matches"][0]["line"],2)
         self.assertNotIn("PRIVATE",json.dumps(r))
         batch=self.b.search_code_batch([r"subprocess\.run", r"shell=True"], max_results=10)
@@ -442,6 +442,39 @@ class BridgeTests(unittest.TestCase):
 
         self.assertEqual([match["path"] for match in resumed["matches"]], ["f2"])
         self.assertEqual(resumed["scanned_files"], 2)
+
+    def test_legacy_cursor_timeout_preserves_skipped_match_count(self):
+        import bridge as bridge_module
+
+        contents = {"f0": b"needle\nneedle\n", "f1": b"needle\n", "f2": b"needle\n"}
+
+        def read_bytes(raw):
+            return self.root / raw, raw, contents[raw]
+
+        with patch.object(self.b, "_search_candidates", side_effect=lambda *args: iter(contents)), \
+                patch.object(self.b, "_read_bytes", side_effect=read_bytes):
+            first = self.b.search_code_batch(["needle"], max_results=2)
+
+        self.assertEqual([(match["path"], match["line"]) for match in first["matches"]],
+                         [("f0", 1), ("f0", 2)])
+        self.assertIsInstance(first["next_cursor"], str)
+
+        ticks = iter((0, 0, 0, 0, 6))
+        with patch.object(self.b, "_search_candidates", side_effect=lambda *args: iter(contents)), \
+                patch.object(self.b, "_read_bytes", side_effect=read_bytes), \
+                patch.object(bridge_module.time, "monotonic", side_effect=lambda: next(ticks)):
+            timed = self.b.search_code_batch(["needle"], cursor=2, max_results=2)
+
+        file_index, line_number, remaining = self.b._search_cursor_decode(timed["next_cursor"])
+        self.assertEqual((file_index, line_number, remaining), (0, 2, 1))
+
+        with patch.object(self.b, "_search_candidates", side_effect=lambda *args: iter(contents)), \
+                patch.object(self.b, "_read_bytes", side_effect=read_bytes), \
+                patch.object(bridge_module.time, "monotonic", return_value=0):
+            resumed = self.b.search_code_batch(["needle"], cursor=timed["next_cursor"], max_results=2)
+
+        self.assertEqual([(match["path"], match["line"]) for match in resumed["matches"]],
+                         [("f1", 1), ("f2", 1)])
 
     def test_git_diff_excludes_sensitive_files_and_preserves_index(self):
         def git(*args):

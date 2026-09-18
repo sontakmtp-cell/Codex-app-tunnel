@@ -320,16 +320,17 @@ class LocalBridge(ChangeJournal):
                 yield relative
 
     @staticmethod
-    def _search_cursor_encode(file_index, line_number):
+    def _search_cursor_encode(file_index, line_number, skip_remaining=0):
         payload = json.dumps(
-            {"version": 1, "file": file_index, "line": line_number},
+            {"version": 2, "file": file_index, "line": line_number, "skip": skip_remaining},
             separators=(",", ":"),
         ).encode("utf-8")
-        return "v1:" + base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+        return "v2:" + base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
 
     @staticmethod
     def _search_cursor_decode(cursor):
-        if not isinstance(cursor, str) or len(cursor) > 2000 or not cursor.startswith("v1:"):
+        if (not isinstance(cursor, str) or len(cursor) > 2000 or
+                not cursor.startswith(("v1:", "v2:"))):
             raise BridgeError("INVALID_INPUT: cursor is not a valid search continuation token.")
         try:
             encoded = cursor[3:]
@@ -337,11 +338,13 @@ class LocalBridge(ChangeJournal):
             state = json.loads(base64.urlsafe_b64decode(encoded.encode("ascii")).decode("utf-8"))
         except (ValueError, UnicodeError, json.JSONDecodeError) as exc:
             raise BridgeError("INVALID_INPUT: cursor is not a valid search continuation token.") from exc
-        if (not isinstance(state, dict) or state.get("version") != 1 or
+        skip_remaining = state.get("skip", 0) if isinstance(state, dict) else None
+        if (not isinstance(state, dict) or state.get("version") not in {1, 2} or
                 type(state.get("file")) is not int or state["file"] < 0 or
-                type(state.get("line")) is not int or state["line"] < 1):
+                type(state.get("line")) is not int or state["line"] < 1 or
+                type(skip_remaining) is not int or skip_remaining < 0):
             raise BridgeError("INVALID_INPUT: cursor is not a valid search continuation token.")
-        return state["file"], state["line"]
+        return state["file"], state["line"], skip_remaining
 
     @staticmethod
     def _validate_search_pattern(pattern, regex):
@@ -382,13 +385,13 @@ class LocalBridge(ChangeJournal):
                      max_results=50, cursor=0, context_lines=2, regex=False,
                      include_globs=None, exclude_globs=None, include_patterns=False):
         integer(max_results, "max_results", 1, 100)
-        legacy_cursor = None
         resume_file = resume_line = 0
+        skip_remaining = 0
         if isinstance(cursor, str):
-            resume_file, resume_line = self._search_cursor_decode(cursor)
+            resume_file, resume_line, skip_remaining = self._search_cursor_decode(cursor)
         else:
             integer(cursor, "cursor", 0, 100000)
-            legacy_cursor = cursor
+            skip_remaining = cursor
         integer(context_lines, "context_lines", 0, 5)
         if type(case_sensitive) is not bool:
             raise BridgeError("INVALID_INPUT: case_sensitive must be boolean.")
@@ -404,7 +407,7 @@ class LocalBridge(ChangeJournal):
         if exclude_globs is None:
             exclude_globs = _SEARCH_DEFAULT_EXCLUDES
         deadline = time.monotonic() + _SEARCH_TIME_BUDGET_SECONDS
-        results, matched, scanned, more, timed_out = [], 0, 0, False, False
+        results, scanned, more, timed_out = [], 0, False, False
         resume_at_file, resume_at_line = resume_file, resume_line or 1
         for file_index, relative in enumerate(self._search_candidates(prefix, file_types, include_globs, exclude_globs)):
             if file_index < resume_file:
@@ -441,8 +444,8 @@ class LocalBridge(ChangeJournal):
                         timed_out = True
                         break
                     continue
-                if legacy_cursor is not None and matched < legacy_cursor:
-                    matched += 1
+                if skip_remaining:
+                    skip_remaining -= 1
                     resume_at_file, resume_at_line = file_index, number + 1
                     if expired:
                         timed_out = True
@@ -459,7 +462,6 @@ class LocalBridge(ChangeJournal):
                 if include_patterns:
                     item["patterns"] = hit_patterns
                 results.append(item)
-                matched += 1
                 resume_at_file, resume_at_line = file_index, number + 1
                 if expired:
                     timed_out = True
@@ -467,10 +469,8 @@ class LocalBridge(ChangeJournal):
             if more or timed_out:
                 break
             resume_at_file, resume_at_line = file_index + 1, 1
-        if timed_out or (more and isinstance(cursor, str)):
-            next_cursor = self._search_cursor_encode(resume_at_file, resume_at_line)
-        else:
-            next_cursor = (legacy_cursor + len(results)) if more else None
+        next_cursor = (self._search_cursor_encode(resume_at_file, resume_at_line, skip_remaining)
+                       if timed_out or more else None)
         return {"matches": results, "next_cursor": next_cursor,
                 "inventory_truncated": False, "output_truncated": False,
                 "scanned_files": scanned, "scan_truncated": timed_out,
